@@ -3,10 +3,12 @@ package anthropic
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
 )
 
 func TestResolveModel(t *testing.T) {
@@ -232,5 +234,73 @@ func TestAnthropicResponseFormat(t *testing.T) {
 	}
 	if parsed["role"] != "assistant" {
 		t.Errorf("role = %v, want assistant", parsed["role"])
+	}
+}
+
+// Catalog-driven Claude id resolution: the synced tenant model list carries
+// ids like "Claude-Opus-4.7-hq" and must win over hardcoded fallback names.
+func TestResolveNativeAnthropicModel_WithCatalog(t *testing.T) {
+	catalog := []string{"JoyAI-Code-1.5", "Claude-Opus-4.7-hq", "Claude-Sonnet-4.6-hq"}
+	cases := []struct {
+		name, model, accountDefault, systemDefault, want string
+	}{
+		{"exact catalog id kept", "Claude-Opus-4.7-hq", "", "", "Claude-Opus-4.7-hq"},
+		{"unknown claude maps to sonnet family", "claude-sonnet-4-20250514", "", "", "Claude-SSonnet"}, // placeholder, fixed below
+		{"opus family", "claude-opus-4", "", "", "Claude-Opus-4.7-hq"},
+		{"non-claude request passes through", "unknown-x", "GLM-5.1", "", "GLM-5.1"},
+		{"legacy fallback without catalog entry", "CLAUDE-future-9", "", "", "Claude-Opus-4.7-hq"},
+	}
+	cases[1].want = "Claude-Sonnet-4.6-hq"
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := resolveNativeAnthropicModel(c.model, c.accountDefault, c.systemDefault, catalog)
+			if got != c.want {
+				t.Errorf("resolveNativeAnthropicModel(%q) = %q, want %q", c.model, got, c.want)
+			}
+		})
+	}
+}
+
+func TestResolveNativeAnthropicModel_NoCatalog(t *testing.T) {
+	// Without a synced catalog we keep the historical behavior.
+	if got := resolveNativeAnthropicModel("claude-sonnet-4-20250514", "", "", nil); got != "Claude-Opus-4.7" {
+		t.Errorf("no-catalog fallback = %q, want Claude-Opus-4.7", got)
+	}
+	if got := resolveNativeAnthropicModel("unknown-x", "GLM-5.1", "", nil); got != "GLM-5.1" {
+		t.Errorf("non-claude passthrough = %q, want GLM-5.1", got)
+	}
+}
+
+func TestTranslateAnthropicRequestWithCatalog(t *testing.T) {
+	catalog := []string{"Claude-Opus-4.7-hq", "Claude-Sonnet-4.6-hq"}
+	req := &MessageRequest{Model: "claude-sonnet-4-20250514", MaxTokens: 1024, Stream: true,
+		Messages: []MessageParam{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	}
+	body := TranslateAnthropicRequestWithCatalog(req, "", "", catalog)
+	if body["model"] != "Claude-Sonnet-4.6-hq" {
+		t.Errorf("model = %v, want Claude-Sonnet-4.6-hq", body["model"])
+	}
+	if body["stream"] != true {
+		t.Errorf("stream = %v, want true", body["stream"])
+	}
+}
+
+func TestClaudeNativeEnabled_FromPluginCatalog(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "proxy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.SetSetting("model_adapters", `{"Claude-Opus-4.8-hq":"anthropic"}`); err != nil {
+		t.Fatal(err)
+	}
+	if !ClaudeNativeEnabled(s) {
+		t.Fatal("plugin anthropic adapter should enable native Claude")
+	}
+	if err := s.SetSetting("enable_claude", "false"); err != nil {
+		t.Fatal(err)
+	}
+	if ClaudeNativeEnabled(s) {
+		t.Fatal("explicit false should disable native Claude")
 	}
 }

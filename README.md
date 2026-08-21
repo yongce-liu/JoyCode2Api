@@ -30,7 +30,8 @@ Codex     ───┘    (协议翻译层)
 ```
 
 - **Anthropic Messages API** (`/v1/messages`) — Claude Code 走这个
-- **OpenAI Chat Completions API** (`/v1/chat/completions`) — Cursor / Codex 走这个
+- **OpenAI Chat Completions API** (`/v1/chat/completions`) — Cursor 等客户端可直接使用
+- **OpenAI Responses API** (`/v1/responses`) — Codex 的 `wire_api = "responses"` 可直接使用；服务会转换后调用 JoyCode Chat Completions
 
 工具调用（tool use）、流式输出（SSE）、上下文截断全部完整翻译，使用体验和原生 API 一致。
 
@@ -115,13 +116,14 @@ CGO_ENABLED=0 go build -o JoyCode2Api ./cmd/JoyCode2Api/
   ─────────────────────────────────────────────────
   Endpoints:
     POST /v1/chat/completions  — Chat (OpenAI format)
+    POST /v1/responses         — Responses (OpenAI/GPT format)
     POST /v1/messages          — Chat (Anthropic/Claude Code format)
     ...
   Dashboard:
     http://0.0.0.0:34891 — Web UI
 ```
 
-> **macOS 且已装 JoyCode IDE**：可以不加 `--skip-validation`，程序会自动从 `~/Library/Application Support/JoyCode/User/globalStorage/state.vscdb` 读取已登录凭据。其他平台首次启动一律加 `--skip-validation`。
+> **已登录 JoyCode IDE 或 JoyCode 编辑器插件**：可以不加 `--skip-validation`。Linux/amd64 会自动检查 VS Code、Cursor、VSCodium、Windsurf 及 VS Code Server 的 `state.vscdb`。
 
 ### 第 3 步：配置 Dashboard
 
@@ -260,7 +262,7 @@ docker build \
 
 `go mod download` 慢的话构建时设 `GOPROXY=https://goproxy.cn,direct`。
 
-**挂载本地凭据（可选）**：宿主机装了 JoyCode IDE 的话，把状态库挂进容器，Dashboard 的「一键导入」就能用：
+**挂载本地凭据（可选）**：宿主机装了 JoyCode IDE 或 JoyCode 编辑器插件时，把状态库挂进容器，Dashboard 的「一键导入」就能用。Linux VS Code 插件的常见路径是 `~/.config/Code/User/globalStorage/state.vscdb`：
 
 ```bash
 docker run -p 34891:34891 \
@@ -295,7 +297,8 @@ docker compose up -d --build
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `POST` | `/v1/messages` | Anthropic Messages API（Claude Code） |
-| `POST` | `/v1/chat/completions` | OpenAI Chat Completions API（Cursor / Codex） |
+| `POST` | `/v1/chat/completions` | OpenAI Chat Completions API（Cursor 等客户端） |
+| `POST` | `/v1/responses` | OpenAI Responses API（GPT / Codex，内部转发到 JoyCode Chat Completions） |
 | `POST` | `/v1/web-search` | 网页搜索 |
 | `POST` | `/v1/rerank` | 文档重排序 |
 | `GET` | `/v1/models` | 可用模型列表 |
@@ -414,10 +417,19 @@ web/                    前端源码（React 19 + Ant Design 6 + Vite 8）
 </details>
 
 <details>
-<summary><b>macOS 上能自动读取凭据，其他平台为什么不行</b></summary>
+<summary><b>Linux / Docker 如何导入 JoyCode 插件凭据</b></summary>
 
-程序通过读取 JoyCode IDE 的 `state.vscdb`（SQLite）获取已登录凭据。macOS 上路径固定在 `~/Library/Application Support/JoyCode/User/globalStorage/state.vscdb`，能自动找到。其他平台需要：
-- 用 `JOYCODE_STATE_DB` 环境变量指定 `state.vscdb` 路径，或
+程序同时支持 JoyCode IDE 的 `JoyCoder.IDE` 状态和编辑器插件的 `JoyCoder.joycoder-fe` 状态。Linux 桌面版 VS Code 通常会被自动发现；Docker 需要把宿主机状态库只读挂载进容器，并通过 `JOYCODE_STATE_DB` 指定容器内路径：
+
+```bash
+-e JOYCODE_STATE_DB=/data/state.vscdb \
+-v "$HOME/.config/Code/User/globalStorage/state.vscdb:/data/state.vscdb:ro"
+```
+
+部署到云端时，也可以先退出本地编辑器，再把 `state.vscdb` 安全复制到服务器并按上面的方式只读挂载。该文件包含登录凭据，不应打进镜像、提交到 Git 或暴露给其他用户；插件短 key 更新后，需要重新同步状态库并再次导入。
+
+也可以：
+- 直接设置 `JOYCODE_STATE_DB` 指向其他编辑器的 `state.vscdb`，或
 - 直接在 Dashboard 扫码 / OAuth 添加账号（推荐）
 </details>
 

@@ -513,7 +513,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request, req *Mess
 }
 
 func (h *Handler) handleNativeAnthropicStream(w http.ResponseWriter, r *http.Request, req *MessageRequest, client *joycode.Client, flusher http.Flusher, systemDefault string) {
-	body := TranslateAnthropicRequest(req, store.GetAccountDefaultModel(r), systemDefault)
+	body := TranslateAnthropicRequestWithCatalog(req, store.GetAccountDefaultModel(r), systemDefault, modelCatalog(h.store))
 	logRequestDetails(r, "translated native anthropic request (stream)", body)
 
 	// Commit SSE headers early so we can send heartbeat comment lines while
@@ -618,7 +618,7 @@ func (h *Handler) handleNativeAnthropicStream(w http.ResponseWriter, r *http.Req
 }
 
 func (h *Handler) handleNativeAnthropicNonStream(w http.ResponseWriter, r *http.Request, req *MessageRequest, client *joycode.Client, systemDefault string) {
-	body := TranslateAnthropicRequest(req, store.GetAccountDefaultModel(r), systemDefault)
+	body := TranslateAnthropicRequestWithCatalog(req, store.GetAccountDefaultModel(r), systemDefault, modelCatalog(h.store))
 	logRequestDetails(r, "translated native anthropic request (non-stream)", body)
 
 	resp, err := h.connectNativeAnthropicStreamWithRetry(r, body, client)

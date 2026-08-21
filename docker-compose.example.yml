@@ -14,7 +14,8 @@ services:
       - "34891:34891"
     volumes:
       - ./joycode-data:/root/.joycode-proxy
-      # 如果宿主机装了 JoyCode IDE，可取消下一行注释挂载本地登录态。
+      # JoyCode IDE 或编辑器插件均可；Linux VS Code 常见宿主机路径：
+      # ~/.config/Code/User/globalStorage/state.vscdb
       # - /path/to/state.vscdb:/root/.joycode-proxy/state.vscdb:ro
     healthcheck:
       test:

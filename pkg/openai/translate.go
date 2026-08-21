@@ -3,6 +3,7 @@ package openai
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
@@ -104,9 +105,21 @@ func newShortID() string {
 // If the client-specified model is a known JoyCode model, pass it through.
 // Otherwise fall back to the account's default model, then the global default.
 func ResolveModel(model string, accountDefault string, systemDefault string) string {
+	return ResolveModelWithCatalog(model, accountDefault, systemDefault, nil)
+}
+
+// ResolveModelWithCatalog also accepts live model ids imported from the
+// editor plugin. Normalized matching lets clients use gpt-5.6-sol for the
+// catalog id "GPT-5.6 Sol".
+func ResolveModelWithCatalog(model string, accountDefault string, systemDefault string, catalog []string) string {
 	for _, m := range joycode.Models {
-		if m == model {
-			return model
+		if sameModelID(m, model) {
+			return m
+		}
+	}
+	for _, m := range catalog {
+		if sameModelID(m, model) {
+			return m
 		}
 	}
 	if accountDefault != "" {
@@ -116,4 +129,19 @@ func ResolveModel(model string, accountDefault string, systemDefault string) str
 		return systemDefault
 	}
 	return joycode.DefaultModel
+}
+
+func sameModelID(a, b string) bool {
+	if strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b)) {
+		return true
+	}
+	normalize := func(s string) string {
+		return strings.Map(func(r rune) rune {
+			if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+				return r
+			}
+			return -1
+		}, strings.ToLower(s))
+	}
+	return normalize(a) != "" && normalize(a) == normalize(b)
 }

@@ -45,7 +45,13 @@ func TranslateRequest(req *MessageRequest, accountDefault string, systemDefault 
 // TranslateAnthropicRequest converts an Anthropic request to JoyCode's native
 // Anthropic endpoint body. Claude-family models reject the legacy OpenAI path.
 func TranslateAnthropicRequest(req *MessageRequest, accountDefault string, systemDefault string) map[string]interface{} {
-	model := resolveNativeAnthropicModel(req.Model, accountDefault, systemDefault)
+	return TranslateAnthropicRequestWithCatalog(req, accountDefault, systemDefault, nil)
+}
+
+// TranslateAnthropicRequestWithCatalog is TranslateAnthropicRequest plus a
+// live model catalog used to resolve Claude ids (see resolveNativeAnthropicModel).
+func TranslateAnthropicRequestWithCatalog(req *MessageRequest, accountDefault string, systemDefault string, catalog []string) map[string]interface{} {
+	model := resolveNativeAnthropicModel(req.Model, accountDefault, systemDefault, catalog)
 	body := map[string]interface{}{
 		"model":      model,
 		"messages":   req.Messages,
@@ -81,13 +87,50 @@ func normalizeAnthropicSystem(raw json.RawMessage) interface{} {
 }
 
 // ClaudeNativeEnabled reports whether the native Anthropic code path is active.
-// Guarded by the "enable_claude" store setting — defaults to false until the
-// upstream JoyCode platform makes Claude models generally available.
+// Plugin imports enable it automatically from adapter/catalog metadata; an
+// explicit enable_claude=false remains an operator override.
 func ClaudeNativeEnabled(s *store.Store) bool {
 	if s == nil {
 		return false
 	}
-	return s.GetSetting("enable_claude") == "true"
+	switch s.GetSetting("enable_claude") {
+	case "true":
+		return true
+	case "false":
+		return false
+	}
+	adapters := map[string]string{}
+	if json.Unmarshal([]byte(s.GetSetting("model_adapters")), &adapters) == nil {
+		for _, adapter := range adapters {
+			if strings.EqualFold(adapter, "anthropic") {
+				return true
+			}
+		}
+	}
+	for _, model := range modelCatalog(s) {
+		if IsNativeAnthropicModel(model) {
+			return true
+		}
+	}
+	return false
+}
+
+func modelCatalog(s *store.Store) []string {
+	if s == nil {
+		return nil
+	}
+	raw := s.GetSetting("available_models")
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	models := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if model := strings.TrimSpace(part); model != "" {
+			models = append(models, model)
+		}
+	}
+	return models
 }
 
 func IsNativeAnthropicModel(model string) bool {
@@ -95,15 +138,76 @@ func IsNativeAnthropicModel(model string) bool {
 	return strings.HasPrefix(m, "claude") || strings.Contains(m, "claude-")
 }
 
-func resolveNativeAnthropicModel(model string, accountDefault string, systemDefault string) string {
+// resolveNativeAnthropicModel picks the upstream model id for the native
+// Anthropic path. Claude ids drift between tenants and over time (e.g. the
+// plugin catalog now exposes "Claude-Opus-4.7-hq"), so a catalog synced from
+// the client login state takes precedence over the hardcoded ids.
+func resolveNativeAnthropicModel(model string, accountDefault string, systemDefault string, catalog []string) string {
+	if matched := catalogModel(catalog, model); matched != "" {
+		return matched
+	}
+	if IsNativeAnthropicModel(model) {
+		return pickClaudeFromCatalog(catalog, model)
+	}
 	resolved := resolveModel(model, accountDefault, systemDefault)
-	if resolved == "Claude-Opus-4.7" {
+	// Exact catalog match always wins — the id is known to exist upstream.
+	if catalogMatch(catalog, resolved) {
 		return resolved
 	}
-	if IsNativeAnthropicModel(resolved) {
-		return "Claude-Opus-4.7"
+	if !IsNativeAnthropicModel(resolved) {
+		// The requested model resolved to a non-Claude fallback, but the
+		// request itself asked for a Claude model — honor that instead of
+		// sending a non-Claude id to the native Anthropic endpoint.
+		if IsNativeAnthropicModel(model) {
+			return pickClaudeFromCatalog(catalog, model)
+		}
+		return resolved
 	}
-	return resolved
+	return pickClaudeFromCatalog(catalog, resolved)
+}
+
+// catalogMatch reports whether model (case-insensitively) exists in catalog.
+func catalogMatch(catalog []string, model string) bool {
+	return catalogModel(catalog, model) != ""
+}
+
+func catalogModel(catalog []string, model string) string {
+	for _, m := range catalog {
+		if strings.EqualFold(m, model) {
+			return m
+		}
+	}
+	return ""
+}
+
+// pickClaudeFromCatalog chooses a Claude id from the catalog, preferring the
+// same family (opus/sonnet/haiku) as the requested model. Without a catalog
+// it falls back to the historical id.
+func pickClaudeFromCatalog(catalog []string, requested string) string {
+	family := ""
+	lower := strings.ToLower(requested)
+	for _, f := range []string{"opus", "sonnet", "haiku"} {
+		if strings.Contains(lower, f) {
+			family = f
+			break
+		}
+	}
+	first := ""
+	for _, m := range catalog {
+		if !strings.Contains(strings.ToLower(m), "claude") {
+			continue
+		}
+		if first == "" {
+			first = m
+		}
+		if family != "" && strings.Contains(strings.ToLower(m), family) {
+			return m
+		}
+	}
+	if first != "" {
+		return first
+	}
+	return "Claude-Opus-4.7"
 }
 
 // convertToolsToOpenAI converts Anthropic-format tools to OpenAI function-calling format.
@@ -302,8 +406,8 @@ func convertAssistantBlocks(blocks []contentBlock) map[string]interface{} {
 	}
 
 	msg := map[string]interface{}{
-		"role":      "assistant",
-		"content":   strings.Join(textParts, "\n"),
+		"role":    "assistant",
+		"content": strings.Join(textParts, "\n"),
 	}
 	if len(toolCalls) > 0 {
 		msg["tool_calls"] = toolCalls
@@ -508,7 +612,7 @@ func convertToolChoice(raw json.RawMessage) interface{} {
 	case "tool":
 		if tc.Name != "" {
 			return map[string]interface{}{
-				"type": "function",
+				"type":     "function",
 				"function": map[string]string{"name": tc.Name},
 			}
 		}

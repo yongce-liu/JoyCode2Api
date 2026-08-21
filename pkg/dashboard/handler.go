@@ -20,12 +20,12 @@ import (
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/auth"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/keepalive"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/proxy"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
+	_ "modernc.org/sqlite"
 )
 
 type Handler struct {
@@ -187,16 +187,16 @@ func (h *Handler) handleErrors(w http.ResponseWriter, r *http.Request) {
 // commonly hit without the /v1/ prefix. When these paths arrive at the
 // SPA catch-all we return a JSON 404 with a helpful hint instead of HTML.
 var knownAPISet = map[string]bool{
-	"/chat/completions":      true,
-	"/completions":           true,
-	"/messages":              true,
-	"/models":                true,
-	"/embeddings":            true,
-	"/web-search":            true,
-	"/rerank":                true,
-	"/images/generations":    true,
-	"/audio/transcriptions":  true,
-	"/audio/translations":    true,
+	"/chat/completions":     true,
+	"/completions":          true,
+	"/messages":             true,
+	"/models":               true,
+	"/embeddings":           true,
+	"/web-search":           true,
+	"/rerank":               true,
+	"/images/generations":   true,
+	"/audio/transcriptions": true,
+	"/audio/translations":   true,
 }
 
 // ServeStatic serves the SPA frontend for non-API routes.
@@ -525,7 +525,11 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 		statuses := h.keeper.GetAllStatuses()
 		for i := range accounts {
 			if s, ok := statuses[accounts[i].UserID]; ok {
-				if s.Valid { accounts[i].CredentialValid = 1 } else { accounts[i].CredentialValid = 0 }
+				if s.Valid {
+					accounts[i].CredentialValid = 1
+				} else {
+					accounts[i].CredentialValid = 0
+				}
 				accounts[i].CredentialCheckedAt = s.LastChecked.Format("2006-01-02 15:04:05")
 				accounts[i].CredentialError = s.ErrorMessage
 			}
@@ -586,7 +590,7 @@ func (h *Handler) handleAutoLogin(w http.ResponseWriter, r *http.Request) {
 	creds, err := auth.LoadFromSystem()
 	if err != nil {
 		slog.Error("auto-login: load from system failed", "error", err)
-		writeError(w, http.StatusBadRequest, "无法从本机获取 JoyCode 凭据: "+err.Error())
+		writeError(w, http.StatusBadRequest, "无法从本机获取 JoyCode 凭据（IDE 或编辑器插件）: "+err.Error())
 		return
 	}
 
@@ -623,6 +627,11 @@ func (h *Handler) handleAutoLogin(w http.ResponseWriter, r *http.Request) {
 			realName = name
 		}
 	}
+	// Nickname falls back to the login name stored in the IDE/plugin state
+	// when userInfo doesn't carry a realName.
+	if realName == "" && creds.RealName != "" {
+		nickname = creds.RealName
+	}
 	if nickname == "" {
 		nickname = userID
 	}
@@ -648,13 +657,28 @@ func (h *Handler) handleAutoLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("auto-login: account saved", "user_id", userID, "nickname", nickname)
+	// Persist the client-synced model catalog (plugin state carries the live
+	// tenant model list) so Claude model ids like "Claude-Opus-4.7-hq" can be
+	// resolved on the native Anthropic path.
+	if len(creds.Models) > 0 {
+		if err := h.store.SetSetting("available_models", strings.Join(creds.Models, ",")); err != nil {
+			slog.Warn("auto-login: persist model catalog failed", "error", err)
+		}
+		if data, err := json.Marshal(creds.ModelAdapters); err == nil {
+			if err := h.store.SetSetting("model_adapters", string(data)); err != nil {
+				slog.Warn("auto-login: persist model adapters failed", "error", err)
+			}
+		}
+	}
+
+	slog.Info("auto-login: account saved", "user_id", userID, "nickname", nickname, "source", creds.Source, "models", len(creds.Models))
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok":         true,
 		"user_id":    userID,
 		"nickname":   nickname,
 		"real_name":  realName,
 		"is_default": isDefault,
+		"source":     creds.Source,
 	})
 }
 
@@ -1155,9 +1179,9 @@ func (h *Handler) listAccountModels(w http.ResponseWriter, r *http.Request, apiK
 	models, err := client.ListModels()
 	if err != nil {
 		slog.Error("list account models", "api_key", apiKey, "error", err)
-		// Fallback to hardcoded list
+		// Prefer the catalog imported from the editor plugin.
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"models": modelInfos(h.modelList),
+			"models": modelInfos(h.availableModels()),
 		})
 		return
 	}
@@ -1312,9 +1336,25 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"models": modelInfos(h.modelList),
-	})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"models": modelInfos(h.availableModels())})
+}
+
+func (h *Handler) availableModels() []string {
+	if h.store != nil {
+		if raw := h.store.GetSetting("available_models"); raw != "" {
+			parts := strings.Split(raw, ",")
+			models := make([]string, 0, len(parts))
+			for _, part := range parts {
+				if model := strings.TrimSpace(part); model != "" {
+					models = append(models, model)
+				}
+			}
+			if len(models) > 0 {
+				return models
+			}
+		}
+	}
+	return h.modelList
 }
 
 func modelInfos(models []string) []map[string]string {
@@ -1358,18 +1398,18 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]interface{}{
-		"total_requests":       stats.TotalRequests,
-		"total_input_tokens":   stats.TotalInputTk,
-		"total_output_tokens":  stats.TotalOutputTk,
-		"accounts_count":       stats.AccountsCount,
-		"avg_latency_ms":       stats.AvgLatencyMs,
-		"error_count":          stats.ErrorCount,
-		"stream_count":         stats.StreamCount,
-		"success_count":        stats.SuccessCount,
-		"by_model":             stats.ByModel,
-		"by_account":           stats.ByAccount,
-		"all_time":             totals,
-		"hourly":               hourly,
+		"total_requests":      stats.TotalRequests,
+		"total_input_tokens":  stats.TotalInputTk,
+		"total_output_tokens": stats.TotalOutputTk,
+		"accounts_count":      stats.AccountsCount,
+		"avg_latency_ms":      stats.AvgLatencyMs,
+		"error_count":         stats.ErrorCount,
+		"stream_count":        stats.StreamCount,
+		"success_count":       stats.SuccessCount,
+		"by_model":            stats.ByModel,
+		"by_account":          stats.ByAccount,
+		"all_time":            totals,
+		"hourly":              hourly,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

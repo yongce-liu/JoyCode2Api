@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -33,9 +34,9 @@ import (
 )
 
 var (
-	serveHost       string
-	servePort       int
-	serveTLS        bool
+	serveHost      string
+	servePort      int
+	serveTLS       bool
 	requestCounter uint64
 )
 
@@ -130,12 +131,51 @@ var serveCmd = &cobra.Command{
 				}
 			}()
 
+			// systemClient holds the local JoyCode login (IDE or editor plugin).
+			// Hoisted out of the closure so the credential DB is read once
+			// instead of on every request, and the model catalog is synced once.
+			systemClient := client
+			catalogSynced := false
+			var systemClientMu sync.Mutex
+			syncCatalog := func(cl *joycode.Client) {
+				if catalogSynced || cl == nil || len(cl.Models) == 0 {
+					return
+				}
+				if err := s.SetSetting("available_models", strings.Join(cl.Models, ",")); err != nil {
+					return
+				}
+				if data, err := json.Marshal(cl.ModelAdapters); err == nil {
+					_ = s.SetSetting("model_adapters", string(data))
+				}
+				catalogSynced = true
+			}
+			syncCatalog(systemClient)
+			// attachNativeContext pins the local client's full login context onto
+			// an account client for Claude and GPT native endpoints: same ptKey,
+			// same loginType (the plugin logs in as "ERP", not "PIN_JD_CLOUD")
+			// and the same tenant routing URLs — otherwise Claude calls 401.
+			attachNativeContext := func(cl *joycode.Client, accountUserID string) {
+				if systemClient == nil || systemClient.PtKey == "" || systemClient.PtKey == "placeholder" || systemClient.UserID != accountUserID {
+					return
+				}
+				cl.SetNativeContext(joycode.NativeContext{
+					PtKey:         systemClient.PtKey,
+					LoginType:     systemClient.LoginType,
+					ColorBaseURL:  systemClient.ColorBaseURL,
+					MasterBaseURL: systemClient.MasterBaseURL,
+					Tenant:        systemClient.Tenant,
+					OrgFullName:   systemClient.OrgFullName,
+				})
+			}
 			resolver := func(r *http.Request) *joycode.Client {
-				systemClient := client
+				systemClientMu.Lock()
+				defer systemClientMu.Unlock()
 				if systemClient != nil && systemClient.PtKey == "placeholder" {
 					if creds, err := auth.LoadFromSystem(); err == nil {
 						systemClient = joycode.NewClient(creds.PtKey, creds.UserID)
 						systemClient.SetColorContext(creds.ColorBaseURL, creds.MasterBaseURL, creds.Tenant, creds.LoginType, creds.OrgFullName)
+						systemClient.SetModelCatalog(creds.Models, creds.ModelAdapters)
+						syncCatalog(systemClient)
 					}
 				}
 				apiKey := extractAPIKey(r)
@@ -146,26 +186,20 @@ var serveCmd = &cobra.Command{
 				if apiKey != "" {
 					if account, _ := s.GetAccountByToken(apiKey); account != nil {
 						cl := joycode.NewClient(account.PtKey, account.UserID)
-						if systemClient != nil && systemClient.PtKey != "" && systemClient.PtKey != "placeholder" && systemClient.UserID == account.UserID {
-							cl.SetAnthropicPtKey(systemClient.PtKey)
-						}
+						attachNativeContext(cl, account.UserID)
 						cl.SetTimeout(time.Duration(timeout) * time.Second)
 						return cl
 					}
 					if account, _ := s.GetAccount(apiKey); account != nil {
 						cl := joycode.NewClient(account.PtKey, account.UserID)
-						if systemClient != nil && systemClient.PtKey != "" && systemClient.PtKey != "placeholder" && systemClient.UserID == account.UserID {
-							cl.SetAnthropicPtKey(systemClient.PtKey)
-						}
+						attachNativeContext(cl, account.UserID)
 						cl.SetTimeout(time.Duration(timeout) * time.Second)
 						return cl
 					}
 				}
 				if account, _ := s.GetDefaultAccount(); account != nil {
 					cl := joycode.NewClient(account.PtKey, account.UserID)
-					if systemClient != nil && systemClient.PtKey != "" && systemClient.PtKey != "placeholder" && systemClient.UserID == account.UserID {
-						cl.SetAnthropicPtKey(systemClient.PtKey)
-					}
+					attachNativeContext(cl, account.UserID)
 					cl.SetTimeout(time.Duration(timeout) * time.Second)
 					cl.SetTransport(sharedTransport)
 					return cl
@@ -246,6 +280,7 @@ var serveCmd = &cobra.Command{
 			fmt.Println()
 			fmt.Println("  Endpoints:")
 			fmt.Println("    POST /v1/chat/completions  — Chat (OpenAI format)")
+			fmt.Println("    POST /v1/responses         — Responses (OpenAI/GPT format)")
 			fmt.Println("    POST /v1/messages          — Chat (Anthropic/Claude Code format)")
 			fmt.Println("    POST /v1/web-search        — Web Search")
 			fmt.Println("    POST /v1/rerank            — Rerank documents")
@@ -433,12 +468,12 @@ func requestLogMiddleware(next http.Handler, s *store.Store) http.Handler {
 			var inTk, outTk int
 			inTk, outTk = store.GetTokenUsage(r)
 			resolvedModel := store.GetModel(r)
-				if resolvedModel != "" {
-					model = resolvedModel
-				}
-				if s.GetSetting("enable_request_logging") != "false" {
-					go s.LogRequest(apiKey, model, path, isStream, rw.statusCode, latency, errMsg, inTk, outTk)
-				}
+			if resolvedModel != "" {
+				model = resolvedModel
+			}
+			if s.GetSetting("enable_request_logging") != "false" {
+				go s.LogRequest(apiKey, model, path, isStream, rw.statusCode, latency, errMsg, inTk, outTk)
+			}
 		}
 	})
 }

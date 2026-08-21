@@ -914,6 +914,26 @@ func TestRequestURL_GatewaySigned(t *testing.T) {
 	}
 }
 
+func TestNativeRequestURL_GPTUsesChatGateway(t *testing.T) {
+	c := NewClient("account-key", "u")
+	c.SetNativeContext(NativeContext{
+		PtKey:        "plugin-short-key",
+		LoginType:    "ERP",
+		ColorBaseURL: "https://plugin-gateway.example.com",
+	})
+	raw := c.nativeRequestURL("/api/saas/openai/v1/chat/completions")
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	if u.Host != "plugin-gateway.example.com" || u.Path != "/api" {
+		t.Fatalf("gateway host/path = %q/%q", u.Host, u.Path)
+	}
+	if got := u.Query().Get("functionId"); got != "chat_completions" {
+		t.Fatalf("functionId = %q, want chat_completions", got)
+	}
+}
+
 func TestRequestURL_DirectV2WhenNoColorBase(t *testing.T) {
 	c := NewClient("k", "u")
 	c.ColorBaseURL = ""
@@ -931,5 +951,75 @@ func TestRequestURL_UnmappedEndpointStaysDirect(t *testing.T) {
 	want := BaseURL + "/api/saas/openai/v1/rerank"
 	if got != want {
 		t.Errorf("unmapped url = %q, want %q", got, want)
+	}
+}
+
+func TestAnthropicHeaders_DefaultsToPinJdCloud(t *testing.T) {
+	c := NewClient("acct-key", "u1")
+	h := c.anthropicHeaders()
+	if got := h["ptKey"][0]; got != "acct-key" {
+		t.Errorf("ptKey = %q, want the account key", got)
+	}
+	if got := h["loginType"][0]; got != "PIN_JD_CLOUD" {
+		t.Errorf("loginType = %q, want PIN_JD_CLOUD fallback", got)
+	}
+}
+
+func TestNativeHeaders_ShortPluginKeyDefaultsToERP(t *testing.T) {
+	key := strings.Repeat("k", 52)
+	c := NewClient(key, "u1")
+	if got := c.nativeHeaders()["loginType"][0]; got != "ERP" {
+		t.Errorf("native loginType = %q, want ERP", got)
+	}
+	if got := c.anthropicHeaders()["loginType"][0]; got != "ERP" {
+		t.Errorf("anthropic loginType = %q, want ERP", got)
+	}
+	body := c.prepareNativeBody(map[string]interface{}{})
+	if body["tenant"] != "JD" {
+		t.Errorf("native tenant = %v, want JD", body["tenant"])
+	}
+}
+
+// The whole point of AnthropicContext: plugin/IDE creds (loginType "ERP",
+// tenant gateway URLs) must drive the native Anthropic request, not the
+// hardcoded "PIN_JD_CLOUD" + public defaults.
+func TestAnthropicContext_DrivesHeadersAndRouting(t *testing.T) {
+	c := NewClient("acct-key", "jd_abc")
+	c.SetAnthropicContext(AnthropicContext{
+		PtKey:         "plugin-key",
+		LoginType:     "ERP",
+		ColorBaseURL:  "https://gw.example.com/base",
+		MasterBaseURL: "http://master.example.com",
+		Tenant:        "JD",
+		OrgFullName:   "集团-实验室",
+	})
+
+	h := c.anthropicHeaders()
+	if got := h["ptKey"][0]; got != "plugin-key" {
+		t.Errorf("anthropic ptKey = %q, want plugin-key", got)
+	}
+	if got := h["loginType"][0]; got != "ERP" {
+		t.Errorf("anthropic loginType = %q, want ERP", got)
+	}
+
+	gotURL := c.nativeRequestURL("/api/saas/anthropic/v1/messages")
+	if !strings.Contains(gotURL, "gw.example.com/base/api?") {
+		t.Errorf("anthropic url not gateway-routed: %q", gotURL)
+	}
+	if !strings.Contains(gotURL, "functionId=anthropic_completions") || !strings.Contains(gotURL, "sign=") {
+		t.Errorf("anthropic url missing functionId/sign: %q", gotURL)
+	}
+
+	body := c.prepareAnthropicBody(map[string]interface{}{"model": "Claude-Opus-4.7-hq"})
+	if body["tenant"] != "JD" || body["orgFullName"] != "集团-实验室" {
+		t.Errorf("body context = %v / %v", body["tenant"], body["orgFullName"])
+	}
+
+	// The openai path must be untouched by the pinned Anthropic context.
+	if got := c.headers()["loginType"][0]; got != "N_PIN_PC" {
+		t.Errorf("openai headers changed: loginType = %q", got)
+	}
+	if got := c.headers()["ptKey"][0]; got != "acct-key" {
+		t.Errorf("openai headers changed: ptKey = %q", got)
 	}
 }

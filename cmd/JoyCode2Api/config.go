@@ -35,7 +35,7 @@ var configCmd = &cobra.Command{
 			if err != nil {
 				fmt.Printf("    Source:    not available (%s)\n", err)
 			} else {
-				fmt.Printf("    Source:    auto-detected\n")
+				fmt.Printf("    Source:    auto-detected (%s)\n", creds.Source)
 				fmt.Printf("    UserID:    %s\n", creds.UserID)
 				fmt.Printf("    PtKey:     %s...%s\n", creds.PtKey[:8], creds.PtKey[len(creds.PtKey)-4:])
 			}

@@ -6,7 +6,7 @@
 *.dylib
 /JoyCode2Api
 /JoyCodeProxy
-
+joycode-data
 # Go build cache
 *.test
 *.out

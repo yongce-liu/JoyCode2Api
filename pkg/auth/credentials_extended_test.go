@@ -15,6 +15,10 @@ func TestLoadFromSystem_NonDarwin(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		t.Skip("skipping non-darwin test on darwin")
 	}
+	// Isolate from the real machine: an editor plugin (or IDE) may actually
+	// be logged in on the dev host, so HOME must point at an empty dir.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
 	_, err := LoadFromSystem()
 	if err == nil {
 		t.Fatal("expected error on non-darwin platform, got nil")

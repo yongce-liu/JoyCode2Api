@@ -200,8 +200,8 @@ func TestModels_Get(t *testing.T) {
 	}
 }
 
-// Test 32: Server error returns 500
-func TestModels_ServerError(t *testing.T) {
+// Test 32: Server error falls back to the cached/built-in catalog.
+func TestModels_ServerErrorFallsBackToCatalog(t *testing.T) {
 	errorBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
 		w.Write([]byte(`{"error":"internal"}`))
@@ -225,8 +225,15 @@ func TestModels_ServerError(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 500 {
-		t.Fatalf("expected 500, got %d", resp.StatusCode)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if data, ok := result["data"].([]interface{}); !ok || len(data) == 0 {
+		t.Fatalf("expected fallback model list, got %#v", result)
 	}
 }
 
@@ -478,9 +485,9 @@ func TestRerank_Valid(t *testing.T) {
 	rerankResp := map[string]interface{}{
 		"results": []interface{}{
 			map[string]interface{}{
-				"index":          float64(0),
+				"index":           float64(0),
 				"relevance_score": float64(0.95),
-				"document":       map[string]interface{}{"text": "doc1"},
+				"document":        map[string]interface{}{"text": "doc1"},
 			},
 		},
 	}

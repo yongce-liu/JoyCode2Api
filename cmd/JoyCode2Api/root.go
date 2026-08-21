@@ -78,6 +78,7 @@ func resolveClient() (*joycode.Client, error) {
 	log.Printf("Credentials source: %s (userId=%s)", source, creds.UserID)
 	client := joycode.NewClient(creds.PtKey, creds.UserID)
 	client.SetColorContext(creds.ColorBaseURL, creds.MasterBaseURL, creds.Tenant, creds.LoginType, creds.OrgFullName)
+	client.SetModelCatalog(creds.Models, creds.ModelAdapters)
 
 	if skipValidation {
 		log.Printf("Credential validation skipped (--skip-validation)")

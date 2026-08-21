@@ -29,10 +29,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
 		systemDefault = s.store.GetSetting("default_model")
 	}
-	model := ResolveModel(req.Model, store.GetAccountDefaultModel(r), systemDefault)
-		store.SetModel(r, model)
-		jcBody := TranslateRequest(&req)
+	model := ResolveModelWithCatalog(req.Model, store.GetAccountDefaultModel(r), systemDefault, modelCatalog(s.store))
+	store.SetModel(r, model)
+	req.Model = model
+	jcBody := TranslateRequest(&req)
 	client := s.getClient(r)
+	if IsNativeResponsesModel(model, s.store) {
+		s.handleShortKeyChat(w, r, client, jcBody, model, req.Stream)
+		return
+	}
 	if req.Stream {
 		s.handleStreamChat(w, r, client, jcBody, model)
 	} else {

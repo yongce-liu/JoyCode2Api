@@ -34,6 +34,7 @@ func (s *Server) getClient(r *http.Request) *joycode.Client {
 // RegisterRoutes registers all OpenAI-compatible endpoints on the mux.
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/chat/completions", s.handleChat)
+	mux.HandleFunc("/v1/responses", s.handleResponses)
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/web-search", s.handleWebSearch)
 	mux.HandleFunc("/v1/rerank", s.handleRerank)
@@ -96,7 +97,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]interface{}{
 		"status": "ok", "service": "joycode-openai-proxy",
 		"endpoints": []string{
-			"/v1/chat/completions", "/v1/models",
+			"/v1/chat/completions", "/v1/responses", "/v1/models",
 			"/v1/web-search", "/v1/rerank",
 		},
 	})
@@ -108,9 +109,18 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	models, err := s.getClient(r).ListModels()
 	if err != nil {
-		slog.Error("list models upstream error", "error", err)
-		writeError(w, 500, err.Error())
-		return
+		// Model discovery must still work with imported/plugin credentials when
+		// the live model-list request is temporarily unavailable. Prefer the
+		// catalog synced from the plugin, then fall back to built-ins.
+		slog.Warn("list models upstream error, using cached catalog", "error", err)
+		ids := modelCatalog(s.store)
+		if len(ids) == 0 {
+			ids = joycode.Models
+		}
+		models = make([]joycode.ModelInfo, 0, len(ids))
+		for _, id := range ids {
+			models = append(models, joycode.ModelInfo{Label: id, ChatAPIModel: id, ModelID: id})
+		}
 	}
 	writeJSON(w, 200, TranslateModels(models))
 }
