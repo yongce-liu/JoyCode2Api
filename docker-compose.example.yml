@@ -15,8 +15,7 @@ services:
     volumes:
       - ./joycode-data:/root/.joycode-proxy
       # JoyCode IDE 或编辑器插件均可；Linux VS Code 常见宿主机路径：
-      # ~/.config/Code/User/globalStorage/state.vscdb
-      # - /path/to/state.vscdb:/root/.joycode-proxy/state.vscdb:ro
+      - ~/.config/Code/User/globalStorage/state.vscdb:/root/.joycode-proxy/state.vscdb:ro
     healthcheck:
       test:
         - CMD-SHELL
