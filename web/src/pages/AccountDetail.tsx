@@ -210,12 +210,9 @@ const AccountDetail: React.FC = () => {
   }
   if (!account) return <div style={{ textAlign: 'center', padding: 100 }}>账号不存在</div>;
 
-  const allModelOptions = [
-    ...BUILTIN_MODELS,
-    ...models
-      .filter((m) => !BUILTIN_MODELS.some((b) => b.value === m.id))
-      .map((m) => ({ label: m.name || m.id, value: m.id })),
-  ];
+  const allModelOptions = models.length
+    ? models.map((m) => ({ label: m.name || m.id, value: m.id }))
+    : BUILTIN_MODELS;
 
   const filteredLogs = logFilter === 'all'
     ? logs

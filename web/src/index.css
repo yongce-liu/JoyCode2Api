@@ -269,6 +269,7 @@ code, pre, .ant-typography code, .jc-mono {
 .ant-btn-dangerous {
   border-color: var(--jc-danger) !important;
   color: var(--jc-danger) !important;
+  box-shadow: none !important;
 }
 
 .ant-btn-dangerous:hover {
@@ -418,9 +419,17 @@ code, pre, .ant-typography code, .jc-mono {
 
 /* ─── Popover ─────────────────────────────────────────────────── */
 
+.ant-popover {
+  --ant-arrow-background-color: var(--jc-bg-elevated) !important;
+}
+
 .ant-popover-inner {
   background: var(--jc-bg-elevated) !important;
   border: 1px solid var(--jc-border) !important;
+}
+
+.ant-popover-arrow::before {
+  background: var(--jc-bg-elevated) !important;
 }
 
 .ant-popover-title {

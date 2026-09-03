@@ -8,8 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 	"testing"
+	"time"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/keepalive"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
@@ -137,8 +137,8 @@ func TestHandleAddAndListAccounts(t *testing.T) {
 
 	// Add account
 	req := makeRequest(t, "POST", "/api/accounts", map[string]interface{}{
-		"user_id": "test-user",
-		"pt_key":  "test-pt",
+		"user_id":  "test-user",
+		"pt_key":   "test-pt",
 		"nickname": "TestNick",
 	})
 	w := httptest.NewRecorder()
@@ -253,6 +253,13 @@ func TestHandleUpdateModel(t *testing.T) {
 }
 
 // --- Models ---
+
+func TestModelInfosUseFrontendShape(t *testing.T) {
+	models := modelInfos([]string{"GLM-5.3", "Claude-Opus-4.8-hq"})
+	if len(models) != 2 || models[0]["id"] != "GLM-5.3" || models[1]["name"] != "Claude-Opus-4.8-hq" {
+		t.Fatalf("modelInfos() = %#v", models)
+	}
+}
 
 func TestHandleModels(t *testing.T) {
 	h, _ := setupTestHandler(t)

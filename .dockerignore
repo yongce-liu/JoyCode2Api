@@ -1,0 +1,7 @@
+.git
+.gitignore
+Dockerfile.build
+dist
+joycode-data
+web/node_modules
+*.log

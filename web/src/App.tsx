@@ -169,6 +169,7 @@ const antTheme = {
       controlHeightSM: 28,
       primaryShadow: '0 2px 6px rgba(34, 197, 94, 0.2)',
       defaultShadow: 'none',
+      dangerShadow: 'none',
       dashShadow: 'none',
     },
     Input: {

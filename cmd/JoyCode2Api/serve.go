@@ -101,42 +101,30 @@ var serveCmd = &cobra.Command{
 
 		// Per-request client resolution from database accounts
 		if s != nil {
-			// Shared transport for connection pooling and limits
+			// Shared transport for connection reuse. Transport fields must not be
+			// mutated after first use; apply max_connections once at startup.
+			maxConns := s.GetIntSetting("max_connections", 20)
+			if maxConns < 1 {
+				maxConns = 1
+			}
+			idleConns := maxConns / 2
+			if idleConns < 2 {
+				idleConns = 2
+			}
 			sharedTransport := &http.Transport{
-				MaxIdleConnsPerHost: 10,
-				MaxConnsPerHost:     20,
+				MaxIdleConns:        maxConns * 2,
+				MaxIdleConnsPerHost: idleConns,
+				MaxConnsPerHost:     maxConns,
 				IdleConnTimeout:     90 * time.Second,
 			}
 
-			// Background goroutine to sync max_connections setting
-			go func() {
-				ticker := time.NewTicker(10 * time.Second)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ticker.C:
-						maxConns := s.GetIntSetting("max_connections", 20)
-						if maxConns < 1 {
-							maxConns = 1
-						}
-						sharedTransport.MaxConnsPerHost = maxConns
-						idle := maxConns / 2
-						if idle < 2 {
-							idle = 2
-						}
-						sharedTransport.MaxIdleConnsPerHost = idle
-					case <-stopCh:
-						return
-					}
-				}
-			}()
-
 			// systemClient holds the local JoyCode login (IDE or editor plugin).
-			// Hoisted out of the closure so the credential DB is read once
-			// instead of on every request, and the model catalog is synced once.
 			systemClient := client
+			if systemClient != nil {
+				systemClient.SetTransport(sharedTransport)
+			}
 			catalogSynced := false
-			var systemClientMu sync.Mutex
+			var systemClientMu sync.RWMutex
 			syncCatalog := func(cl *joycode.Client) {
 				if catalogSynced || cl == nil || len(cl.Models) == 0 {
 					return
@@ -150,61 +138,83 @@ var serveCmd = &cobra.Command{
 				catalogSynced = true
 			}
 			syncCatalog(systemClient)
-			// attachNativeContext pins the local client's full login context onto
-			// an account client for Claude and GPT native endpoints: same ptKey,
-			// same loginType (the plugin logs in as "ERP", not "PIN_JD_CLOUD")
-			// and the same tenant routing URLs — otherwise Claude calls 401.
-			attachNativeContext := func(cl *joycode.Client, accountUserID string) {
-				if systemClient == nil || systemClient.PtKey == "" || systemClient.PtKey == "placeholder" || systemClient.UserID != accountUserID {
+			syncLiveCatalog := func(cl *joycode.Client) {
+				if cl == nil || cl.PtKey == "" || cl.PtKey == "placeholder" {
+					return
+				}
+				go func() {
+					models, err := cl.ListModels()
+					if err != nil {
+						return
+					}
+					ids := make([]string, 0, len(models))
+					for _, model := range models {
+						if id := strings.TrimSpace(model.ChatAPIModel); id != "" {
+							ids = append(ids, id)
+						}
+					}
+					if len(ids) > 0 {
+						_ = s.SetSetting("available_models", strings.Join(ids, ","))
+					}
+				}()
+			}
+			syncLiveCatalog(systemClient)
+			attachNativeContext := func(cl *joycode.Client, accountUserID string, native *joycode.Client) {
+				if native == nil || native.PtKey == "" || native.PtKey == "placeholder" || native.UserID != accountUserID {
 					return
 				}
 				cl.SetNativeContext(joycode.NativeContext{
-					PtKey:         systemClient.PtKey,
-					LoginType:     systemClient.LoginType,
-					ColorBaseURL:  systemClient.ColorBaseURL,
-					MasterBaseURL: systemClient.MasterBaseURL,
-					Tenant:        systemClient.Tenant,
-					OrgFullName:   systemClient.OrgFullName,
+					PtKey:         native.PtKey,
+					LoginType:     native.LoginType,
+					ColorBaseURL:  native.ColorBaseURL,
+					MasterBaseURL: native.MasterBaseURL,
+					Tenant:        native.Tenant,
+					OrgFullName:   native.OrgFullName,
 				})
 			}
 			resolver := func(r *http.Request) *joycode.Client {
-				systemClientMu.Lock()
-				defer systemClientMu.Unlock()
-				if systemClient != nil && systemClient.PtKey == "placeholder" {
-					if creds, err := auth.LoadFromSystem(); err == nil {
-						systemClient = joycode.NewClient(creds.PtKey, creds.UserID)
-						systemClient.SetColorContext(creds.ColorBaseURL, creds.MasterBaseURL, creds.Tenant, creds.LoginType, creds.OrgFullName)
-						systemClient.SetModelCatalog(creds.Models, creds.ModelAdapters)
-						syncCatalog(systemClient)
+				systemClientMu.RLock()
+				currentSystemClient := systemClient
+				systemClientMu.RUnlock()
+				if currentSystemClient != nil && currentSystemClient.PtKey == "placeholder" {
+					systemClientMu.Lock()
+					if systemClient != nil && systemClient.PtKey == "placeholder" {
+						if creds, err := auth.LoadFromSystem(); err == nil {
+							systemClient = joycode.NewClient(creds.PtKey, creds.UserID)
+							systemClient.SetColorContext(creds.ColorBaseURL, creds.MasterBaseURL, creds.Tenant, creds.LoginType, creds.OrgFullName)
+							systemClient.SetModelCatalog(creds.Models, creds.ModelAdapters)
+							systemClient.SetTransport(sharedTransport)
+							syncCatalog(systemClient)
+							syncLiveCatalog(systemClient)
+						}
 					}
+					currentSystemClient = systemClient
+					systemClientMu.Unlock()
 				}
 				apiKey := extractAPIKey(r)
 				timeout := s.GetIntSetting("request_timeout", 1800)
 				if timeout < 60 {
 					timeout = 60
 				}
-				if apiKey != "" {
-					if account, _ := s.GetAccountByToken(apiKey); account != nil {
-						cl := joycode.NewClient(account.PtKey, account.UserID)
-						attachNativeContext(cl, account.UserID)
-						cl.SetTimeout(time.Duration(timeout) * time.Second)
-						return cl
-					}
-					if account, _ := s.GetAccount(apiKey); account != nil {
-						cl := joycode.NewClient(account.PtKey, account.UserID)
-						attachNativeContext(cl, account.UserID)
-						cl.SetTimeout(time.Duration(timeout) * time.Second)
-						return cl
-					}
-				}
-				if account, _ := s.GetDefaultAccount(); account != nil {
-					cl := joycode.NewClient(account.PtKey, account.UserID)
-					attachNativeContext(cl, account.UserID)
+				newClient := func(ptKey, userID string) *joycode.Client {
+					cl := joycode.NewClient(ptKey, userID)
+					attachNativeContext(cl, userID, currentSystemClient)
 					cl.SetTimeout(time.Duration(timeout) * time.Second)
 					cl.SetTransport(sharedTransport)
 					return cl
 				}
-				return systemClient
+				if apiKey != "" {
+					if account, _ := s.GetAccountByToken(apiKey); account != nil {
+						return newClient(account.PtKey, account.UserID)
+					}
+					if account, _ := s.GetAccount(apiKey); account != nil {
+						return newClient(account.PtKey, account.UserID)
+					}
+				}
+				if account, _ := s.GetDefaultAccount(); account != nil {
+					return newClient(account.PtKey, account.UserID)
+				}
+				return currentSystemClient
 			}
 			srv.Resolver = resolver
 			anth.Resolver = resolver

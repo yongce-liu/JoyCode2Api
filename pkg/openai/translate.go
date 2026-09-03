@@ -63,12 +63,19 @@ func TranslateResponse(jcResp map[string]interface{}, model string) map[string]i
 func TranslateModels(jcModels []joycode.ModelInfo) map[string]interface{} {
 	data := make([]map[string]interface{}, 0, len(jcModels))
 	for _, m := range jcModels {
-		mid := m.ModelID
+		mid := m.ChatAPIModel
+		if mid == "" {
+			mid = m.ModelID
+		}
 		if mid == "" {
 			mid = m.Label
 		}
+		displayName := mid
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(mid)), "gpt") {
+			mid = nativeResponsesModelID(mid)
+		}
 		entry := map[string]interface{}{
-			"id": mid, "object": "model",
+			"id": mid, "object": "model", "display_name": displayName,
 			"created": 1700000000, "owned_by": "joycode",
 		}
 		if caps, ok := ModelCapabilities[mid]; ok {

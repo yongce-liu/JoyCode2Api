@@ -1186,7 +1186,20 @@ func (h *Handler) listAccountModels(w http.ResponseWriter, r *http.Request, apiK
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"models": models})
+	ids := make([]string, 0, len(models))
+	for _, model := range models {
+		id := strings.TrimSpace(model.ChatAPIModel)
+		if id == "" {
+			id = strings.TrimSpace(model.ModelID)
+		}
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) > 0 {
+		_ = h.store.SetSetting("available_models", strings.Join(ids, ","))
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"models": modelInfos(ids)})
 }
 
 func (h *Handler) getAccountStats(w http.ResponseWriter, r *http.Request, apiKey string) {

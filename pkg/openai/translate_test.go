@@ -256,15 +256,26 @@ func TestTranslateModels_Multiple(t *testing.T) {
 	}
 }
 
-// Test 16: Model with ModelID uses ModelID
-func TestTranslateModels_UsesModelID(t *testing.T) {
+// Test 16: The request-facing chatApiModel takes priority over internal IDs.
+func TestTranslateModels_UsesChatAPIModel(t *testing.T) {
 	models := []joycode.ModelInfo{
-		{Label: "Display Name", ModelID: "internal-id"},
+		{Label: "Display Name", ChatAPIModel: "request-id", ModelID: "internal-id"},
 	}
 	result := TranslateModels(models)
 	data := result["data"].([]map[string]interface{})
-	if data[0]["id"] != "internal-id" {
-		t.Errorf("expected id=internal-id, got %v", data[0]["id"])
+	if data[0]["id"] != "request-id" {
+		t.Errorf("expected id=request-id, got %v", data[0]["id"])
+	}
+}
+
+func TestTranslateModels_NormalizesGPTRequestID(t *testing.T) {
+	models := []joycode.ModelInfo{{ChatAPIModel: "GPT-5.6 Sol"}}
+	data := TranslateModels(models)["data"].([]map[string]interface{})
+	if data[0]["id"] != "gpt-5.6-sol" {
+		t.Errorf("expected usable GPT id, got %v", data[0]["id"])
+	}
+	if data[0]["display_name"] != "GPT-5.6 Sol" {
+		t.Errorf("expected original display name, got %v", data[0]["display_name"])
 	}
 }
 

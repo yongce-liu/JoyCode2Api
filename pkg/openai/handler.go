@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
@@ -108,6 +109,21 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	models, err := s.getClient(r).ListModels()
+	if err == nil && s.store != nil {
+		ids := make([]string, 0, len(models))
+		for _, model := range models {
+			id := strings.TrimSpace(model.ChatAPIModel)
+			if id == "" {
+				id = strings.TrimSpace(model.ModelID)
+			}
+			if id != "" {
+				ids = append(ids, id)
+			}
+		}
+		if len(ids) > 0 {
+			_ = s.store.SetSetting("available_models", strings.Join(ids, ","))
+		}
+	}
 	if err != nil {
 		// Model discovery must still work with imported/plugin credentials when
 		// the live model-list request is temporarily unavailable. Prefer the
