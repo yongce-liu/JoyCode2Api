@@ -74,6 +74,11 @@ func setting(s *store.Store, key string) string {
 func (s *Server) handleShortKeyChat(w http.ResponseWriter, r *http.Request, client *joycode.Client, body map[string]interface{}, model string, stream bool) {
 	body["model"] = nativeResponsesModelID(model)
 	if stream {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			writeError(w, http.StatusInternalServerError, "streaming not supported")
+			return
+		}
 		resp, err := client.PostNativeStream(nativeChatEndpoint, body)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, err.Error())
@@ -84,19 +89,7 @@ func (s *Server) handleShortKeyChat(w http.ResponseWriter, r *http.Request, clie
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.WriteHeader(http.StatusOK)
-		flusher, _ := w.(http.Flusher)
-		scanner := bufio.NewScanner(resp.Body)
-		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.HasPrefix(line, "data:") {
-				recordChatUsageLine(r, line)
-			}
-			fmt.Fprintln(w, line)
-			if flusher != nil {
-				flusher.Flush()
-			}
-		}
+		relayChatStream(w, flusher, r, resp.Body, model)
 		return
 	}
 	resp, err := client.PostNative(nativeChatEndpoint, body)

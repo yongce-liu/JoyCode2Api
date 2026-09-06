@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -112,10 +113,7 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request, client
 		if isTimeoutError(msg) {
 			msg = "上游服务响应超时，请稍后重试。原始错误: " + msg
 		}
-		fmt.Fprintf(w, "data: {\"error\":{\"message\":\"%s\"}}\n\n", msg)
-		flusher.Flush()
-		fmt.Fprint(w, "data: [DONE]\n\n")
-		flusher.Flush()
+		writeChatStreamError(w, flusher, msg, "upstream_connection_error")
 		return
 	}
 	defer resp.Body.Close()
@@ -123,56 +121,119 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request, client
 	<-heartbeatDone
 	slog.Info("stream: connected to upstream", "model", model, "ttfb_ms", time.Since(streamStart).Milliseconds())
 
-	// Pipe JoyCode SSE response line-by-line — already OpenAI-compatible format.
-	// Using bufio.Scanner (not raw Read) ensures each SSE event is forwarded
-	// as soon as it arrives, without buffering multiple events into one write.
-	// Also extract usage tokens from the final chunk for dashboard stats.
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	var inTk, outTk int
+	relayChatStream(w, flusher, r, resp.Body, model)
+}
+
+type chatStreamChunk struct {
+	Choices []struct {
+		FinishReason *string `json:"finish_reason"`
+	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
+	Error *struct {
+		Message string      `json:"message"`
+		Code    interface{} `json:"code"`
+	} `json:"error"`
+}
+
+func relayChatStream(w io.Writer, flusher http.Flusher, r *http.Request, body io.Reader, model string) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	var inTk, outTk, chunkCount int
+	var finishReason string
+	var streamErr *chatStreamChunk
 	sawDone := false
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
-			// Empty line separates SSE events; forward as-is.
-			w.Write([]byte("\n"))
+			if !sawDone {
+				fmt.Fprintln(w)
+				flusher.Flush()
+			}
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			fmt.Fprintln(w, line)
 			flusher.Flush()
 			continue
 		}
-		if strings.Contains(line, "[DONE]") {
+
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
 			sawDone = true
+			continue
 		}
-		w.Write([]byte(line))
-		w.Write([]byte("\n"))
-		flusher.Flush()
-		// Extract usage from data lines (the final chunk carries usage stats)
-		if strings.HasPrefix(line, "data: ") && !strings.Contains(line, "[DONE]") {
-			var chunk struct {
-				Usage *struct {
-					PromptTokens     int `json:"prompt_tokens"`
-					CompletionTokens int `json:"completion_tokens"`
-				} `json:"usage"`
-			}
-			if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk) == nil && chunk.Usage != nil {
+
+		var chunk chatStreamChunk
+		if json.Unmarshal([]byte(payload), &chunk) == nil {
+			chunkCount++
+			if chunk.Usage != nil {
 				inTk = chunk.Usage.PromptTokens
 				outTk = chunk.Usage.CompletionTokens
 			}
+			if chunk.Error != nil {
+				streamErr = &chunk
+				break
+			}
+			for _, choice := range chunk.Choices {
+				if choice.FinishReason != nil && *choice.FinishReason != "" {
+					finishReason = *choice.FinishReason
+				}
+			}
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		slog.Error("chat stream read error", "model", model, "error", err)
-	}
-	// Ensure the stream terminates with [DONE]. Some upstream responses omit it
-	// (e.g. premature close, certain error paths), leaving clients like
-	// CherryStudio hanging in "generating" state. Always send a final [DONE].
-	if !sawDone {
-		slog.Warn("stream ended without [DONE], sending terminator", "model", model)
-		w.Write([]byte("data: [DONE]\n\n"))
+
+		fmt.Fprintln(w, line)
 		flusher.Flush()
 	}
+
 	if inTk > 0 || outTk > 0 {
 		store.SetTokenUsage(r, inTk, outTk)
 	}
+	if streamErr != nil {
+		message := streamErr.Error.Message
+		if message == "" {
+			message = "upstream returned a stream error"
+		}
+		code := fmt.Sprint(streamErr.Error.Code)
+		if code == "" || code == "<nil>" {
+			code = "upstream_stream_error"
+		}
+		slog.Error("chat stream upstream error", "model", model, "code", code, "chunks", chunkCount)
+		writeChatStreamError(w, flusher, message, code)
+		return
+	}
+	if err := scanner.Err(); err != nil && finishReason == "" {
+		slog.Error("chat stream read error before finish_reason", "model", model, "error", err, "chunks", chunkCount, "saw_done", sawDone)
+		writeChatStreamError(w, flusher, "upstream stream interrupted before finish_reason: "+err.Error(), "upstream_stream_error")
+		return
+	}
+	if finishReason == "" {
+		slog.Warn("chat stream closed before finish_reason", "model", model, "chunks", chunkCount, "saw_done", sawDone)
+		writeChatStreamError(w, flusher, "upstream stream closed before finish_reason", "upstream_stream_error")
+		return
+	}
+	if err := scanner.Err(); err != nil {
+		slog.Warn("chat stream read error after finish_reason", "model", model, "finish_reason", finishReason, "error", err)
+	}
+	slog.Info("chat stream completed", "model", model, "finish_reason", finishReason, "chunks", chunkCount, "saw_done", sawDone)
+	fmt.Fprint(w, "data: [DONE]\n\n")
+	flusher.Flush()
+}
+
+func writeChatStreamError(w io.Writer, flusher http.Flusher, message, code string) {
+	payload, _ := json.Marshal(map[string]interface{}{
+		"error": map[string]interface{}{
+			"message": message,
+			"type":    "api_error",
+			"param":   nil,
+			"code":    code,
+		},
+	})
+	fmt.Fprintf(w, "data: %s\n\n", payload)
+	flusher.Flush()
 }
 
 func isTimeoutError(msg string) bool {
