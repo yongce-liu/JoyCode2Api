@@ -934,6 +934,26 @@ func TestNativeRequestURL_GPTUsesChatGateway(t *testing.T) {
 	}
 }
 
+func TestNativeRequestURL_GPTUsesResponsesGateway(t *testing.T) {
+	c := NewClient("account-key", "u")
+	c.SetNativeContext(NativeContext{
+		PtKey:        "plugin-short-key",
+		LoginType:    "ERP",
+		ColorBaseURL: "https://plugin-gateway.example.com",
+	})
+	raw := c.nativeRequestURL("/api/saas/openai/v1/responses")
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	if u.Host != "plugin-gateway.example.com" || u.Path != "/api" {
+		t.Fatalf("gateway host/path = %q/%q", u.Host, u.Path)
+	}
+	if got := u.Query().Get("functionId"); got != "responses_completions" {
+		t.Fatalf("functionId = %q, want responses_completions", got)
+	}
+}
+
 func TestRequestURL_DirectV2WhenNoColorBase(t *testing.T) {
 	c := NewClient("k", "u")
 	c.ColorBaseURL = ""

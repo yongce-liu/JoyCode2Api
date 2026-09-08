@@ -49,6 +49,7 @@ type colorEndpoint struct {
 
 var colorEndpoints = map[string]colorEndpoint{
 	"/api/saas/openai/v1/chat/completions": {"chat_completions", "/api/saas/openai/v2/chat/completions"},
+	"/api/saas/openai/v1/responses":        {"responses_completions", "/api/saas/openai/v1/responses"},
 	"/api/saas/models/v1/modelList":        {"joycode_modelList", "/api/saas/models/v2/modelList"},
 	"/api/saas/openai/v1/web-search":       {"web_search", "/api/saas/openai/v2/web-search"},
 	"/api/saas/user/v1/userInfo":           {"joycode_userInfo", "/api/saas/user/v2/userInfo"},

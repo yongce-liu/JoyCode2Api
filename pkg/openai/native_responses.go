@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -13,7 +15,10 @@ import (
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
 )
 
-const nativeChatEndpoint = "/api/saas/openai/v1/chat/completions"
+const (
+	nativeChatEndpoint      = "/api/saas/openai/v1/chat/completions"
+	nativeResponsesEndpoint = "/api/saas/openai/v1/responses"
+)
 
 func modelCatalog(s *store.Store) []string {
 	if s == nil {
@@ -38,28 +43,15 @@ func modelAdapters(s *store.Store) map[string]string {
 	return adapters
 }
 
-// IsNativeResponsesModel is retained for compatibility. It identifies GPT
-// models that require the plugin short key; JoyCode still serves them through
-// Chat Completions even when the client-facing protocol is Responses.
+// IsNativeResponsesModel identifies exact model IDs that the plugin catalog
+// assigns to JoyCode's native Responses adapter.
 func IsNativeResponsesModel(model string, s *store.Store) bool {
 	for id, adapter := range modelAdapters(s) {
-		if sameModelID(id, model) && strings.EqualFold(adapter, "openai-response") {
+		if id == model && strings.EqualFold(adapter, "openai-response") {
 			return true
 		}
 	}
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "gpt")
-}
-
-// nativeResponsesModelID normalizes a catalog display name to the canonical
-// upstream model id expected by the openai-response adapter. JoyCode's color
-// gateway forwards openai-response models straight to the real OpenAI upstream,
-// which rejects the human-facing catalog label ("GPT-5.6 Sol") with a 1032
-// "HTTP调用异常" error and only accepts the lowercased, hyphenated id
-// ("gpt-5.6-sol"). Chat-completions adapter models (GLM, Claude, ...) keep
-// their catalog id, so this transform is applied only on the GPT native path.
-func nativeResponsesModelID(model string) string {
-	id := strings.ToLower(strings.TrimSpace(model))
-	return strings.Join(strings.Fields(id), "-")
+	return false
 }
 
 func setting(s *store.Store, key string) string {
@@ -70,9 +62,9 @@ func setting(s *store.Store, key string) string {
 }
 
 // handleShortKeyChat sends an OpenAI Chat Completions request with the plugin
-// short-key context. The upstream endpoint remains chat/completions.
+// short-key context while preserving the client-visible model ID.
 func (s *Server) handleShortKeyChat(w http.ResponseWriter, r *http.Request, client *joycode.Client, body map[string]interface{}, model string, stream bool) {
-	body["model"] = nativeResponsesModelID(model)
+	body["model"] = model
 	if stream {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -120,21 +112,121 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	request["model"] = model
 	store.SetModel(r, model)
-	chatBody := responsesRequestToChat(request)
-	chatBody["model"] = nativeResponsesModelID(model)
 	stream, _ := request["stream"].(bool)
 	client := s.getClient(r)
 	if stream {
-		s.streamChatAsResponses(w, r, client, chatBody, model)
+		s.streamNativeResponses(w, r, client, request, model)
 		return
 	}
-	chatResp, err := client.PostNative(nativeChatEndpoint, chatBody)
+	response, err := client.PostNative(nativeResponsesEndpoint, request)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	recordChatUsage(r, chatResp)
-	writeJSON(w, http.StatusOK, chatResponseToResponses(chatResp, model))
+	recordResponsesUsageObject(r, response)
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) streamNativeResponses(w http.ResponseWriter, r *http.Request, client *joycode.Client, request map[string]interface{}, model string) {
+	body := make(map[string]interface{}, len(request))
+	for key, value := range request {
+		body[key] = value
+	}
+	body["model"] = model
+	resp, err := client.PostNativeStream(nativeResponsesEndpoint, body)
+	if err != nil {
+		slog.Error("native responses upstream error", "model", model, "error", err)
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.WriteHeader(http.StatusOK)
+	relayNativeResponses(w, responseFlusher(w), r, resp.Body)
+}
+
+func responseFlusher(w http.ResponseWriter) http.Flusher {
+	flusher, _ := w.(http.Flusher)
+	return flusher
+}
+
+// relayNativeResponses removes the extra SSE data envelope added by the Color
+// Gateway. Direct JoyCode responses are already standard SSE and pass through.
+func relayNativeResponses(w io.Writer, flusher http.Flusher, r *http.Request, body io.Reader) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	pendingEvent := ""
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" && pendingEvent != "" {
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			switch {
+			case strings.HasPrefix(payload, "event:"):
+				pendingEvent = payload
+				continue
+			case strings.HasPrefix(payload, "data:"):
+				if pendingEvent != "" {
+					fmt.Fprintln(w, pendingEvent)
+					pendingEvent = ""
+				}
+				fmt.Fprintln(w, payload)
+				fmt.Fprintln(w)
+				recordResponsesUsage(r, strings.TrimSpace(strings.TrimPrefix(payload, "data:")))
+				if flusher != nil {
+					flusher.Flush()
+				}
+				continue
+			}
+		}
+		fmt.Fprintln(w, line)
+		if line == "" && flusher != nil {
+			flusher.Flush()
+		}
+	}
+	if pendingEvent != "" {
+		fmt.Fprintln(w, pendingEvent)
+		fmt.Fprintln(w)
+	}
+	if err := scanner.Err(); err != nil {
+		slog.Error("native responses stream read error", "error", err)
+		data, _ := json.Marshal(map[string]interface{}{
+			"type": "error", "message": "upstream stream interrupted: " + err.Error(), "code": "upstream_stream_error", "param": nil,
+		})
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", data)
+	}
+	if flusher != nil {
+		flusher.Flush()
+	}
+}
+
+func recordResponsesUsageObject(r *http.Request, response map[string]interface{}) {
+	usage, _ := response["usage"].(map[string]interface{})
+	if usage != nil {
+		store.SetTokenUsage(r, numberAsInt(usage["input_tokens"]), numberAsInt(usage["output_tokens"]))
+	}
+}
+
+func recordResponsesUsage(r *http.Request, payload string) {
+	if payload == "" || payload == "[DONE]" {
+		return
+	}
+	var event map[string]interface{}
+	if json.Unmarshal([]byte(payload), &event) != nil {
+		return
+	}
+	response, _ := event["response"].(map[string]interface{})
+	usage, _ := response["usage"].(map[string]interface{})
+	if usage == nil {
+		usage, _ = event["usage"].(map[string]interface{})
+	}
+	if usage != nil {
+		store.SetTokenUsage(r, numberAsInt(usage["input_tokens"]), numberAsInt(usage["output_tokens"]))
+	}
 }
 
 func responsesRequestToChat(request map[string]interface{}) map[string]interface{} {
@@ -296,6 +388,10 @@ func (s *Server) streamChatAsResponses(w http.ResponseWriter, r *http.Request, c
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
+	relayChatAsResponses(w, flusher, r, resp.Body, model)
+}
+
+func relayChatAsResponses(w io.Writer, flusher http.Flusher, r *http.Request, body io.Reader, model string) {
 	responseID := "resp_" + newShortID()
 	messageID := "msg_" + newShortID()
 	sequence := 0
@@ -327,7 +423,11 @@ func (s *Server) streamChatAsResponses(w http.ResponseWriter, r *http.Request, c
 	}
 	calls := map[int]*streamedCall{}
 	usage := chatUsageToResponses(nil)
-	scanner := bufio.NewScanner(resp.Body)
+	finishReason := ""
+	upstreamErrorMessage := ""
+	upstreamErrorCode := ""
+	sawDone := false
+	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -335,12 +435,21 @@ func (s *Server) streamChatAsResponses(w http.ResponseWriter, r *http.Request, c
 			continue
 		}
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" || payload == "[DONE]" {
+		if payload == "" {
+			continue
+		}
+		if payload == "[DONE]" {
+			sawDone = true
 			continue
 		}
 		var chunk map[string]interface{}
 		if json.Unmarshal([]byte(payload), &chunk) != nil {
 			continue
+		}
+		if rawError, ok := chunk["error"].(map[string]interface{}); ok {
+			upstreamErrorMessage, _ = rawError["message"].(string)
+			upstreamErrorCode = fmt.Sprint(rawError["code"])
+			break
 		}
 		if rawUsage, ok := chunk["usage"]; ok {
 			usage = chatUsageToResponses(rawUsage)
@@ -351,6 +460,9 @@ func (s *Server) streamChatAsResponses(w http.ResponseWriter, r *http.Request, c
 			continue
 		}
 		choice, _ := choices[0].(map[string]interface{})
+		if reason, ok := choice["finish_reason"].(string); ok && reason != "" {
+			finishReason = reason
+		}
 		delta, _ := choice["delta"].(map[string]interface{})
 		if value, ok := delta["content"].(string); ok && value != "" {
 			text.WriteString(value)
@@ -391,6 +503,28 @@ func (s *Server) streamChatAsResponses(w http.ResponseWriter, r *http.Request, c
 		}
 	}
 
+	if upstreamErrorMessage != "" {
+		if upstreamErrorCode == "" || upstreamErrorCode == "<nil>" {
+			upstreamErrorCode = "upstream_stream_error"
+		}
+		slog.Error("responses stream upstream error", "model", model, "code", upstreamErrorCode)
+		writeResponsesStreamError(writeEvent, upstreamErrorMessage, upstreamErrorCode)
+		return
+	}
+	if err := scanner.Err(); err != nil && finishReason == "" {
+		slog.Error("responses stream read error before finish_reason", "model", model, "error", err, "saw_done", sawDone)
+		writeResponsesStreamError(writeEvent, "upstream stream interrupted before finish_reason: "+err.Error(), "upstream_stream_error")
+		return
+	}
+	if finishReason == "" {
+		slog.Warn("responses stream closed before finish_reason", "model", model, "saw_done", sawDone)
+		writeResponsesStreamError(writeEvent, "upstream stream closed before finish_reason", "upstream_stream_error")
+		return
+	}
+	if err := scanner.Err(); err != nil {
+		slog.Warn("responses stream read error after finish_reason", "model", model, "finish_reason", finishReason, "error", err)
+	}
+
 	writeEvent(map[string]interface{}{"type": "response.output_text.done", "item_id": messageID, "output_index": 0, "content_index": 0, "text": text.String(), "logprobs": []interface{}{}})
 	doneMessage := responseMessageItem(messageID, text.String(), "completed")
 	writeEvent(map[string]interface{}{"type": "response.content_part.done", "item_id": messageID, "output_index": 0, "content_index": 0, "part": doneMessage["content"].([]interface{})[0]})
@@ -416,6 +550,12 @@ func (s *Server) streamChatAsResponses(w http.ResponseWriter, r *http.Request, c
 		"model": model, "output": output, "usage": usage, "error": nil, "incomplete_details": nil,
 	}
 	writeEvent(map[string]interface{}{"type": "response.completed", "response": completed})
+}
+
+func writeResponsesStreamError(writeEvent func(map[string]interface{}), message, code string) {
+	writeEvent(map[string]interface{}{
+		"type": "error", "message": message, "code": code, "param": nil,
+	})
 }
 
 func recordChatUsageLine(r *http.Request, line string) {

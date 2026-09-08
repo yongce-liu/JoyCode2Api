@@ -3,7 +3,6 @@ package openai
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
@@ -71,9 +70,6 @@ func TranslateModels(jcModels []joycode.ModelInfo) map[string]interface{} {
 			mid = m.Label
 		}
 		displayName := mid
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(mid)), "gpt") {
-			mid = nativeResponsesModelID(mid)
-		}
 		entry := map[string]interface{}{
 			"id": mid, "object": "model", "display_name": displayName,
 			"created": 1700000000, "owned_by": "joycode",
@@ -115,19 +111,12 @@ func ResolveModel(model string, accountDefault string, systemDefault string) str
 	return ResolveModelWithCatalog(model, accountDefault, systemDefault, nil)
 }
 
-// ResolveModelWithCatalog also accepts live model ids imported from the
-// editor plugin. Normalized matching lets clients use gpt-5.6-sol for the
-// catalog id "GPT-5.6 Sol".
+// ResolveModelWithCatalog preserves client-visible model IDs. The catalog is
+// accepted for API compatibility but does not define aliases: callers should
+// use exactly the IDs returned by /v1/models.
 func ResolveModelWithCatalog(model string, accountDefault string, systemDefault string, catalog []string) string {
-	for _, m := range joycode.Models {
-		if sameModelID(m, model) {
-			return m
-		}
-	}
-	for _, m := range catalog {
-		if sameModelID(m, model) {
-			return m
-		}
+	if model != "" {
+		return model
 	}
 	if accountDefault != "" {
 		return accountDefault
@@ -136,19 +125,4 @@ func ResolveModelWithCatalog(model string, accountDefault string, systemDefault 
 		return systemDefault
 	}
 	return joycode.DefaultModel
-}
-
-func sameModelID(a, b string) bool {
-	if strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b)) {
-		return true
-	}
-	normalize := func(s string) string {
-		return strings.Map(func(r rune) rune {
-			if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
-				return r
-			}
-			return -1
-		}, strings.ToLower(s))
-	}
-	return normalize(a) != "" && normalize(a) == normalize(b)
 }

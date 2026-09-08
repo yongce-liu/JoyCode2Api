@@ -35,10 +35,6 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	req.Model = model
 	jcBody := TranslateRequest(&req)
 	client := s.getClient(r)
-	if IsNativeResponsesModel(model, s.store) {
-		s.handleShortKeyChat(w, r, client, jcBody, model, req.Stream)
-		return
-	}
 	if req.Stream {
 		s.handleStreamChat(w, r, client, jcBody, model)
 	} else {

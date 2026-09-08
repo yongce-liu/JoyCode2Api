@@ -268,11 +268,11 @@ func TestTranslateModels_UsesChatAPIModel(t *testing.T) {
 	}
 }
 
-func TestTranslateModels_NormalizesGPTRequestID(t *testing.T) {
+func TestTranslateModels_PreservesGPTRequestID(t *testing.T) {
 	models := []joycode.ModelInfo{{ChatAPIModel: "GPT-5.6 Sol"}}
 	data := TranslateModels(models)["data"].([]map[string]interface{})
-	if data[0]["id"] != "gpt-5.6-sol" {
-		t.Errorf("expected usable GPT id, got %v", data[0]["id"])
+	if data[0]["id"] != "GPT-5.6 Sol" {
+		t.Errorf("expected catalog model id, got %v", data[0]["id"])
 	}
 	if data[0]["display_name"] != "GPT-5.6 Sol" {
 		t.Errorf("expected original display name, got %v", data[0]["display_name"])

@@ -11,24 +11,10 @@ import (
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 )
 
-func TestResolveModelWithCatalog_NormalizedGPT(t *testing.T) {
+func TestResolveModelWithCatalog_PreservesRequestedID(t *testing.T) {
 	got := ResolveModelWithCatalog("gpt-5.6-sol", "", "", []string{"GPT-5.6 Sol"})
-	if got != "GPT-5.6 Sol" {
+	if got != "gpt-5.6-sol" {
 		t.Fatalf("resolved model = %q", got)
-	}
-}
-
-func TestNativeResponsesModelID(t *testing.T) {
-	cases := map[string]string{
-		"GPT-5.6 Sol": "gpt-5.6-sol",
-		"gpt-5.6-sol": "gpt-5.6-sol",
-		"GPT-5.6  Sol": "gpt-5.6-sol",
-		"  GPT-5.6 Sol  ": "gpt-5.6-sol",
-	}
-	for in, want := range cases {
-		if got := nativeResponsesModelID(in); got != want {
-			t.Errorf("nativeResponsesModelID(%q) = %q, want %q", in, got, want)
-		}
 	}
 }
 
@@ -69,19 +55,19 @@ func TestResponsesRequestToChat_ConvertsTools(t *testing.T) {
 	}
 }
 
-func TestNativeChat_UsesPluginShortKeyAndChatEndpoint(t *testing.T) {
+func TestNativeChat_PreservesCatalogModelID(t *testing.T) {
 	frontend, cleanup := setupShortKeyGPTServer(t, func(w http.ResponseWriter, r *http.Request, body map[string]interface{}) {
-		// The upstream openai-response route only accepts the canonical model id,
-		// not the catalog display label — sending "GPT-5.6 Sol" triggers a 1032
-		// "HTTP调用异常" from the gateway. See nativeResponsesModelID.
-		if body["tenant"] != "JD" || body["model"] != "gpt-5.6-sol" {
-			t.Errorf("native body = %#v", body)
+		if r.URL.Path != "/api/saas/openai/v2/chat/completions" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if body["model"] != "GPT-5.6 Sol" {
+			t.Errorf("model = %#v, want catalog ID", body["model"])
 		}
 		writeTestJSON(w, `{"id":"chatcmpl-1","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}`)
 	})
 	defer cleanup()
 
-	resp, err := http.Post(frontend.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"gpt-5.6-sol","messages":[{"role":"user","content":"hi"}]}`))
+	resp, err := http.Post(frontend.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"GPT-5.6 Sol","messages":[{"role":"user","content":"hi"}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,20 +85,19 @@ func TestNativeChat_UsesPluginShortKeyAndChatEndpoint(t *testing.T) {
 	}
 }
 
-func TestResponses_UsesChatUpstream(t *testing.T) {
+func TestResponses_UsesNativeUpstream(t *testing.T) {
 	frontend, cleanup := setupShortKeyGPTServer(t, func(w http.ResponseWriter, r *http.Request, body map[string]interface{}) {
-		if body["model"] != "gpt-5.6-sol" {
-			t.Errorf("upstream model = %#v, want gpt-5.6-sol", body["model"])
+		if r.URL.Path != "/api/saas/openai/v1/responses" {
+			t.Errorf("path = %q", r.URL.Path)
 		}
-		messages := body["messages"].([]interface{})
-		if messages[0].(map[string]interface{})["content"] != "hi" {
-			t.Errorf("chat messages = %#v", messages)
+		if body["model"] != "GPT-5.6 Sol" {
+			t.Errorf("model = %#v, want catalog ID", body["model"])
 		}
-		writeTestJSON(w, `{"id":"chatcmpl-1","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}`)
+		writeTestJSON(w, `{"id":"resp-1","object":"response","status":"completed","model":"GPT-5.6 Sol","output":[],"usage":{"input_tokens":2,"output_tokens":1}}`)
 	})
 	defer cleanup()
 
-	resp, err := http.Post(frontend.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"gpt-5.6-sol","input":"hi"}`))
+	resp, err := http.Post(frontend.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"GPT-5.6 Sol","input":"hi"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,51 +109,149 @@ func TestResponses_UsesChatUpstream(t *testing.T) {
 	if result["object"] != "response" || result["status"] != "completed" || result["model"] != "GPT-5.6 Sol" {
 		t.Fatalf("responses result = %#v", result)
 	}
-	output := result["output"].([]interface{})
-	content := output[0].(map[string]interface{})["content"].([]interface{})
-	if content[0].(map[string]interface{})["text"] != "hello" {
-		t.Fatalf("responses output = %#v", output)
-	}
 }
 
-func TestResponsesStream_ConvertsChatEvents(t *testing.T) {
+func TestResponsesStream_UsesNativeResponsesUpstream(t *testing.T) {
 	frontend, cleanup := setupShortKeyGPTServer(t, func(w http.ResponseWriter, r *http.Request, body map[string]interface{}) {
+		if r.URL.Path != "/api/saas/openai/v1/responses" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if body["model"] != "GPT-5.6 Sol" {
+			t.Errorf("model = %#v, want catalog label", body["model"])
+		}
 		if body["stream"] != true {
 			t.Errorf("stream = %#v", body["stream"])
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你\"}}]}\n\n")
-		io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"好\"},\"finish_reason\":null}]}\n\n")
-		io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":2}}\n\n")
+		io.WriteString(w, "data: event: response.created\n\n")
+		io.WriteString(w, "data: data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n")
+		io.WriteString(w, "data: event: response.output_text.delta\n\n")
+		io.WriteString(w, "data: data: {\"type\":\"response.output_text.delta\",\"delta\":\"你好\"}\n\n")
+		io.WriteString(w, "data: event: response.completed\n\n")
+		io.WriteString(w, "data: data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
 		io.WriteString(w, "data: [DONE]\n\n")
 	})
 	defer cleanup()
 
-	resp, err := http.Post(frontend.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"gpt-5.6-sol","input":"你好","stream":true}`))
+	resp, err := http.Post(frontend.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"GPT-5.6 Sol","input":"你好","stream":true}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	stream := string(data)
-	for _, want := range []string{"event: response.created", "event: response.output_text.delta", `"delta":"你"`, `"delta":"好"`, "event: response.completed"} {
+	for _, want := range []string{"event: response.created", "event: response.output_text.delta", `"delta":"你好"`, "event: response.completed"} {
 		if !strings.Contains(stream, want) {
 			t.Errorf("stream missing %q:\n%s", want, stream)
 		}
+	}
+	if strings.Contains(stream, "data: event:") || strings.Contains(stream, "data: data:") {
+		t.Fatalf("gateway SSE envelope was not removed:\n%s", stream)
+	}
+}
+
+func TestRelayNativeResponses_UnwrapsGatewaySSE(t *testing.T) {
+	input := strings.Join([]string{
+		"data: event: response.created",
+		"",
+		`data: data: {"type":"response.created","response":{"status":"in_progress"}}`,
+		"",
+		"data: event: response.completed",
+		"",
+		`data: data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/responses", nil)
+
+	relayNativeResponses(w, w, req, strings.NewReader(input))
+	stream := w.Body.String()
+
+	for _, want := range []string{
+		"event: response.created\ndata: {\"type\":\"response.created\"",
+		"event: response.completed\ndata: {\"type\":\"response.completed\"",
+		"data: [DONE]",
+	} {
+		if !strings.Contains(stream, want) {
+			t.Errorf("stream missing %q:\n%s", want, stream)
+		}
+	}
+	if strings.Contains(stream, "data: event:") || strings.Contains(stream, "data: data:") {
+		t.Fatalf("gateway SSE envelope was not removed:\n%s", stream)
+	}
+}
+
+func TestResponsesStreamPrematureCloseSurfacesError(t *testing.T) {
+	stream := runResponsesRelay(t, strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n"))
+
+	assertResponsesStreamError(t, stream, "upstream stream closed before finish_reason")
+}
+
+func TestResponsesStreamDoneWithoutFinishReasonSurfacesError(t *testing.T) {
+	stream := runResponsesRelay(t, strings.NewReader("data: [DONE]\n\n"))
+
+	assertResponsesStreamError(t, stream, "upstream stream closed before finish_reason")
+}
+
+func TestResponsesStreamReadErrorSurfacesError(t *testing.T) {
+	body := &streamErrReader{
+		data: []byte("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"),
+		err:  io.ErrUnexpectedEOF,
+	}
+	stream := runResponsesRelay(t, body)
+
+	assertResponsesStreamError(t, stream, "unexpected EOF")
+}
+
+func TestResponsesStreamUpstreamErrorSurfacesError(t *testing.T) {
+	stream := runResponsesRelay(t, strings.NewReader("data: {\"error\":{\"message\":\"generation failed\",\"code\":\"server_error\"}}\n\n"))
+
+	assertResponsesStreamError(t, stream, "generation failed")
+	if !strings.Contains(stream, `"code":"server_error"`) {
+		t.Fatalf("upstream error code missing:\n%s", stream)
+	}
+}
+
+func runResponsesRelay(t *testing.T, body io.Reader) string {
+	t.Helper()
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/responses", nil)
+	relayChatAsResponses(w, w, req, body, "test-model")
+	return w.Body.String()
+}
+
+func assertResponsesStreamError(t *testing.T, stream, message string) {
+	t.Helper()
+	if strings.Contains(stream, "event: response.completed") {
+		t.Fatalf("failed stream must not complete:\n%s", stream)
+	}
+	if !strings.Contains(stream, "event: error") || !strings.Contains(stream, `"type":"error"`) || !strings.Contains(stream, message) {
+		t.Fatalf("stream error missing:\n%s", stream)
 	}
 }
 
 func setupShortKeyGPTServer(t *testing.T, handler func(http.ResponseWriter, *http.Request, map[string]interface{})) (*httptest.Server, func()) {
 	t.Helper()
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/saas/openai/v2/chat/completions" {
-			t.Errorf("path = %q", r.URL.Path)
+		if r.URL.Path != "/api/saas/openai/v2/chat/completions" && r.URL.Path != "/api/saas/openai/v1/responses" {
+			t.Errorf("unexpected path = %q", r.URL.Path)
 		}
-		if got := r.Header.Get("ptKey"); got != "plugin-short-key" {
-			t.Errorf("ptKey = %q", got)
-		}
-		if got := r.Header.Get("loginType"); got != "ERP" {
-			t.Errorf("loginType = %q", got)
+		if r.URL.Path == "/api/saas/openai/v1/responses" {
+			if got := r.Header.Get("ptKey"); got != "plugin-short-key" {
+				t.Errorf("responses ptKey = %q", got)
+			}
+			if got := r.Header.Get("loginType"); got != "ERP" {
+				t.Errorf("responses loginType = %q", got)
+			}
+		} else {
+			if got := r.Header.Get("ptKey"); got != "account-long-key" {
+				t.Errorf("chat ptKey = %q", got)
+			}
+			if got := r.Header.Get("loginType"); got != "N_PIN_PC" {
+				t.Errorf("chat loginType = %q", got)
+			}
 		}
 		var body map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
