@@ -84,8 +84,8 @@ type Client struct {
 	httpClient     *http.Client
 }
 
-// NativeContext bundles the short-key authentication and tenant routing used
-// by plugin-native adapters such as Anthropic Messages and GPT Chat Completions.
+// NativeContext optionally overrides account authentication and tenant routing
+// for plugin-native adapters such as Anthropic Messages and GPT Responses.
 type NativeContext struct {
 	PtKey         string
 	LoginType     string
@@ -582,7 +582,8 @@ func (c *Client) PostAnthropicStream(endpoint string, body map[string]interface{
 	return resp, nil
 }
 
-// PostNative calls a plugin-native JSON endpoint with short-key context.
+// PostNative calls a native JSON endpoint using the account credentials, with
+// an optional plugin context override when one is available.
 func (c *Client) PostNative(endpoint string, body map[string]interface{}) (map[string]interface{}, error) {
 	resp, err := c.doNativePost(endpoint, c.prepareNativeBody(body), false)
 	if err != nil {
@@ -602,7 +603,8 @@ func (c *Client) PostNative(endpoint string, body map[string]interface{}) (map[s
 	return result, nil
 }
 
-// PostNativeStream calls a plugin-native SSE endpoint without gzip buffering.
+// PostNativeStream calls a native SSE endpoint without gzip buffering, using
+// the account credentials unless a plugin context override is available.
 func (c *Client) PostNativeStream(endpoint string, body map[string]interface{}) (*http.Response, error) {
 	resp, err := c.doNativePost(endpoint, c.prepareNativeBody(body), true)
 	if err != nil {

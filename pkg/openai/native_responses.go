@@ -43,15 +43,57 @@ func modelAdapters(s *store.Store) map[string]string {
 	return adapters
 }
 
-// IsNativeResponsesModel identifies exact model IDs that the plugin catalog
-// assigns to JoyCode's native Responses adapter.
+// IsNativeResponsesModel identifies models served by JoyCode's native
+// Responses endpoint. Plugin metadata is authoritative when present, but GPT
+// models must also work with account credentials obtained through server login,
+// where no editor-plugin adapter catalog exists.
 func IsNativeResponsesModel(model string, s *store.Store) bool {
+	model = strings.TrimSpace(model)
 	for id, adapter := range modelAdapters(s) {
-		if id == model && strings.EqualFold(adapter, "openai-response") {
-			return true
+		if id == model {
+			return strings.EqualFold(adapter, "openai-response")
 		}
 	}
-	return false
+	return strings.HasPrefix(strings.ToLower(model), "gpt-")
+}
+
+// stripUnsupportedResponsesTools removes built-in tools that JoyCode's
+// Responses backend cannot execute. CLIProxyAPI injects image_generation for
+// Codex providers even when the downstream request did not ask for it.
+func stripUnsupportedResponsesTools(request map[string]interface{}) {
+	tools, ok := request["tools"].([]interface{})
+	if !ok {
+		return
+	}
+
+	filtered := make([]interface{}, 0, len(tools))
+	removedImageGeneration := false
+	for _, rawTool := range tools {
+		tool, ok := rawTool.(map[string]interface{})
+		if ok {
+			typeName, _ := tool["type"].(string)
+			if strings.EqualFold(strings.TrimSpace(typeName), "image_generation") {
+				removedImageGeneration = true
+				continue
+			}
+		}
+		filtered = append(filtered, rawTool)
+	}
+	if !removedImageGeneration {
+		return
+	}
+	if len(filtered) == 0 {
+		delete(request, "tools")
+	} else {
+		request["tools"] = filtered
+	}
+
+	if toolChoice, ok := request["tool_choice"].(map[string]interface{}); ok {
+		typeName, _ := toolChoice["type"].(string)
+		if strings.EqualFold(strings.TrimSpace(typeName), "image_generation") {
+			delete(request, "tool_choice")
+		}
+	}
 }
 
 func setting(s *store.Store, key string) string {
@@ -107,10 +149,11 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	requested, _ := request["model"].(string)
 	model := ResolveModelWithCatalog(requested, store.GetAccountDefaultModel(r), setting(s.store, "default_model"), modelCatalog(s.store))
 	if !IsNativeResponsesModel(model, s.store) {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("model %q does not use the GPT short-key adapter", model))
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("model %q does not support the Responses API", model))
 		return
 	}
 	request["model"] = model
+	stripUnsupportedResponsesTools(request)
 	store.SetModel(r, model)
 	stream, _ := request["stream"].(bool)
 	client := s.getClient(r)

@@ -111,6 +111,83 @@ func TestResponses_UsesNativeUpstream(t *testing.T) {
 	}
 }
 
+func TestResponses_UsesAccountCredentialsWithoutPluginAdapter(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/saas/openai/v1/responses" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if got := r.Header.Get("ptKey"); got != "account-long-key" {
+			t.Errorf("ptKey = %q, want account credential", got)
+		}
+		if got := r.Header.Get("loginType"); got != "N_PIN_PC" {
+			t.Errorf("loginType = %q, want N_PIN_PC", got)
+		}
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["model"] != "GPT-5.6 Sol" {
+			t.Errorf("model = %#v, want catalog ID", body["model"])
+		}
+		tools, ok := body["tools"].([]interface{})
+		if !ok || len(tools) != 1 {
+			t.Fatalf("tools = %#v, want one supported function tool", body["tools"])
+		}
+		tool := tools[0].(map[string]interface{})
+		if tool["type"] != "function" || tool["name"] != "lookup" {
+			t.Fatalf("unexpected remaining tool: %#v", tool)
+		}
+		if _, exists := body["tool_choice"]; exists {
+			t.Fatalf("unsupported image tool choice was not removed: %#v", body["tool_choice"])
+		}
+		writeTestJSON(w, `{"id":"resp-account","object":"response","status":"completed","model":"GPT-5.6 Sol","output":[]}`)
+	}))
+	defer backend.Close()
+
+	client := joycode.NewClient("account-long-key", "jd_user")
+	client.ColorBaseURL = ""
+	client.SetHTTPClient(&http.Client{Transport: redirectTransport{target: backend.URL}})
+	st, storeCleanup, err := newTempStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storeCleanup()
+	if err := st.SetSetting("available_models", "GPT-5.6 Sol"); err != nil {
+		t.Fatal(err)
+	}
+
+	server := NewServer(client, st)
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+	frontend := httptest.NewServer(mux)
+	defer frontend.Close()
+
+	requestBody := `{"model":"GPT-5.6 Sol","input":"hi","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}},{"type":"image_generation","output_format":"png"}],"tool_choice":{"type":"image_generation"}}`
+	resp, err := http.Post(frontend.URL+"/v1/responses", "application/json", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d: %s", resp.StatusCode, data)
+	}
+}
+
+func TestNativeResponsesModel_ExplicitNonResponsesAdapterWins(t *testing.T) {
+	st, cleanup, err := newTempStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := st.SetSetting("model_adapters", `{"GPT-5.6 Sol":"chat-completions"}`); err != nil {
+		t.Fatal(err)
+	}
+	if IsNativeResponsesModel("GPT-5.6 Sol", st) {
+		t.Fatal("explicit non-Responses adapter must not use the native Responses endpoint")
+	}
+}
+
 func TestResponsesStream_UsesNativeResponsesUpstream(t *testing.T) {
 	frontend, cleanup := setupShortKeyGPTServer(t, func(w http.ResponseWriter, r *http.Request, body map[string]interface{}) {
 		if r.URL.Path != "/api/saas/openai/v1/responses" {
