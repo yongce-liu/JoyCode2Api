@@ -363,3 +363,35 @@ func writeTestJSON(w http.ResponseWriter, body string) {
 	w.Header().Set("Content-Type", "application/json")
 	io.WriteString(w, body)
 }
+
+func TestRelayNativeResponses_NormalizesGatewayJSONError(t *testing.T) {
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/responses", nil)
+
+	relayNativeResponses(w, w, req, strings.NewReader("{\"code\":\"1\",\"echo\":\"content length exceeded 5242880 bytes\"}\n"))
+	stream := w.Body.String()
+
+	if !strings.Contains(stream, "event: error") || !strings.Contains(stream, `"code":"request_too_large"`) {
+		t.Fatalf("gateway error was not normalized:\n%s", stream)
+	}
+	if strings.Contains(stream, `{"code":"1","echo"`) {
+		t.Fatalf("raw gateway JSON leaked outside SSE framing:\n%s", stream)
+	}
+	if strings.Count(stream, "event: error") != 1 {
+		t.Fatalf("error event count is not one:\n%s", stream)
+	}
+}
+
+func TestRelayNativeResponses_CleanEOFMissingTerminalEmitsError(t *testing.T) {
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/responses", nil)
+	input := "event: response.created\n" +
+		"data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n"
+
+	relayNativeResponses(w, w, req, strings.NewReader(input))
+	stream := w.Body.String()
+
+	if !strings.Contains(stream, "event: error") || !strings.Contains(stream, "closed before a terminal Responses event") {
+		t.Fatalf("missing terminal error:\n%s", stream)
+	}
+}

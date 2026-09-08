@@ -87,6 +87,19 @@ const FIELD_GROUPS = [
     ],
   },
   {
+    title: '请求预处理',
+    fields: [
+      {
+        key: 'auto_compress_images',
+        label: '自动压缩输入图片',
+        tooltip: '开启后，在请求进入 Responses、Chat Completions 或 Anthropic 处理前统一压缩较大的 base64 图片，并在接近 JoyCode 网关 5 MiB 限制时进一步缩小。关闭后原图透传',
+        placeholder: 'true',
+        type: 'switch' as const,
+        tag: '已生效',
+      },
+    ],
+  },
+  {
     title: '日志与监控',
     fields: [
       {

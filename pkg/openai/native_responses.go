@@ -199,8 +199,40 @@ func responseFlusher(w http.ResponseWriter) http.Flusher {
 // Gateway. Direct JoyCode responses are already standard SSE and pass through.
 func relayNativeResponses(w io.Writer, flusher http.Flusher, r *http.Request, body io.Reader) {
 	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	pendingEvent := ""
+	terminalSeen := false
+	errorSeen := false
+
+	writeStreamError := func(message, code string) {
+		if errorSeen {
+			return
+		}
+		errorSeen = true
+		terminalSeen = true
+		data, _ := json.Marshal(map[string]interface{}{
+			"type": "error", "message": message, "code": code, "param": nil,
+		})
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", data)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	observePayload := func(payload string) {
+		var event map[string]interface{}
+		if json.Unmarshal([]byte(payload), &event) != nil {
+			return
+		}
+		typeName, _ := event["type"].(string)
+		switch typeName {
+		case "response.completed", "response.failed", "response.incomplete":
+			terminalSeen = true
+		case "error":
+			errorSeen = true
+			terminalSeen = true
+		}
+	}
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" && pendingEvent != "" {
@@ -213,18 +245,39 @@ func relayNativeResponses(w io.Writer, flusher http.Flusher, r *http.Request, bo
 				pendingEvent = payload
 				continue
 			case strings.HasPrefix(payload, "data:"):
+				innerPayload := strings.TrimSpace(strings.TrimPrefix(payload, "data:"))
+				if message, code, ok := nativeResponsesGatewayError(innerPayload); ok {
+					pendingEvent = ""
+					slog.Warn("native responses gateway returned an SSE error", "code", code, "message", message)
+					writeStreamError(message, code)
+					continue
+				}
 				if pendingEvent != "" {
 					fmt.Fprintln(w, pendingEvent)
 					pendingEvent = ""
 				}
 				fmt.Fprintln(w, payload)
 				fmt.Fprintln(w)
-				recordResponsesUsage(r, strings.TrimSpace(strings.TrimPrefix(payload, "data:")))
+				observePayload(innerPayload)
+				recordResponsesUsage(r, innerPayload)
 				if flusher != nil {
 					flusher.Flush()
 				}
 				continue
+			default:
+				if message, code, ok := nativeResponsesGatewayError(payload); ok {
+					slog.Warn("native responses gateway returned an SSE error", "code", code, "message", message)
+					writeStreamError(message, code)
+					continue
+				}
+				observePayload(payload)
+				recordResponsesUsage(r, payload)
 			}
+		}
+		if message, code, ok := nativeResponsesGatewayError(line); ok {
+			slog.Warn("native responses gateway returned a JSON error in a 200 stream", "code", code, "message", message)
+			writeStreamError(message, code)
+			continue
 		}
 		fmt.Fprintln(w, line)
 		if line == "" && flusher != nil {
@@ -237,14 +290,56 @@ func relayNativeResponses(w io.Writer, flusher http.Flusher, r *http.Request, bo
 	}
 	if err := scanner.Err(); err != nil {
 		slog.Error("native responses stream read error", "error", err)
-		data, _ := json.Marshal(map[string]interface{}{
-			"type": "error", "message": "upstream stream interrupted: " + err.Error(), "code": "upstream_stream_error", "param": nil,
-		})
-		fmt.Fprintf(w, "event: error\ndata: %s\n\n", data)
+		writeStreamError("upstream stream interrupted: "+err.Error(), "upstream_stream_error")
+	} else if !terminalSeen {
+		slog.Warn("native responses stream closed without a terminal event")
+		writeStreamError("upstream stream closed before a terminal Responses event", "upstream_stream_error")
 	}
 	if flusher != nil {
 		flusher.Flush()
 	}
+}
+
+func nativeResponsesGatewayError(line string) (message, code string, ok bool) {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "{") {
+		return "", "", false
+	}
+	var payload map[string]interface{}
+	if json.Unmarshal([]byte(trimmed), &payload) != nil {
+		return "", "", false
+	}
+	if _, hasType := payload["type"]; hasType {
+		return "", "", false
+	}
+	if echo, _ := payload["echo"].(string); echo != "" {
+		message = echo
+	}
+	if message == "" {
+		message, _ = payload["message"].(string)
+	}
+	if message == "" {
+		message, _ = payload["msg"].(string)
+	}
+	if rawError, isMap := payload["error"].(map[string]interface{}); isMap {
+		if message == "" {
+			message, _ = rawError["message"].(string)
+		}
+		code = fmt.Sprint(rawError["code"])
+	}
+	if code == "" || code == "<nil>" {
+		code = fmt.Sprint(payload["code"])
+	}
+	if message == "" {
+		return "", "", false
+	}
+	if strings.Contains(strings.ToLower(message), "content length exceeded") {
+		code = "request_too_large"
+		message = "请求包含的内嵌图片或上下文超过 JoyCode 网关 5 MiB 限制；请压缩上下文或减少图片大小。上游错误: " + message
+	} else if code == "" || code == "<nil>" {
+		code = "upstream_stream_error"
+	}
+	return message, code, true
 }
 
 func recordResponsesUsageObject(r *http.Request, response map[string]interface{}) {

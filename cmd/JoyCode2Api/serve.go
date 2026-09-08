@@ -25,6 +25,7 @@ import (
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/anthropic"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/auth"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/dashboard"
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/imageinput"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/keepalive"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/logrot"
@@ -257,6 +258,7 @@ var serveCmd = &cobra.Command{
 		}
 
 		var handler http.Handler = mux
+		handler = imageinput.Middleware(s, handler)
 		if s != nil {
 			handler = auth.JWTMiddleware(s, handler)
 			handler = requestLogMiddleware(handler, s)

@@ -393,7 +393,7 @@ func TestHandleUpdateSettingsCoercesNonStringValues(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	// Raw JSON body with bool, number, null and string values.
-	body := `{"enable_request_logging":false,"max_connections":12,"theme":"dark","cleared":null}`
+	body := `{"enable_request_logging":false,"auto_compress_images":false,"max_connections":12,"theme":"dark","cleared":null}`
 	req := httptest.NewRequest("PUT", "/api/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -410,6 +410,9 @@ func TestHandleUpdateSettingsCoercesNonStringValues(t *testing.T) {
 
 	if got := settings["enable_request_logging"]; got != "false" {
 		t.Errorf("enable_request_logging = %v, want \"false\"", got)
+	}
+	if got := settings["auto_compress_images"]; got != "false" {
+		t.Errorf("auto_compress_images = %v, want \"false\"", got)
 	}
 	if got := settings["max_connections"]; got != "12" {
 		t.Errorf("max_connections = %v, want \"12\"", got)
