@@ -22,14 +22,13 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/vibe-coding-labs/JoyCode2Api/pkg/anthropic"
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/api"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/auth"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/dashboard"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/imageinput"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/keepalive"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/logrot"
-	"github.com/vibe-coding-labs/JoyCode2Api/pkg/openai"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/proxy"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
 )
@@ -90,8 +89,7 @@ var serveCmd = &cobra.Command{
 			}
 		}
 
-		srv := openai.NewServer(client, s)
-		anth := anthropic.NewHandler(client, s)
+		srv := api.NewServer(client, s)
 
 		// Start credential keepalive: check every 10min, refresh accounts older than 1h
 		keeper := keepalive.NewKeeper(s, 1*time.Hour)
@@ -133,9 +131,6 @@ var serveCmd = &cobra.Command{
 				if err := s.SetSetting("available_models", strings.Join(cl.Models, ",")); err != nil {
 					return
 				}
-				if data, err := json.Marshal(cl.ModelAdapters); err == nil {
-					_ = s.SetSetting("model_adapters", string(data))
-				}
 				catalogSynced = true
 			}
 			syncCatalog(systemClient)
@@ -165,12 +160,10 @@ var serveCmd = &cobra.Command{
 					return
 				}
 				cl.SetNativeContext(joycode.NativeContext{
-					PtKey:         native.PtKey,
-					LoginType:     native.LoginType,
-					ColorBaseURL:  native.ColorBaseURL,
-					MasterBaseURL: native.MasterBaseURL,
-					Tenant:        native.Tenant,
-					OrgFullName:   native.OrgFullName,
+					PtKey:       native.PtKey,
+					LoginType:   native.LoginType,
+					Tenant:      native.Tenant,
+					OrgFullName: native.OrgFullName,
 				})
 			}
 			resolver := func(r *http.Request) *joycode.Client {
@@ -182,8 +175,8 @@ var serveCmd = &cobra.Command{
 					if systemClient != nil && systemClient.PtKey == "placeholder" {
 						if creds, err := auth.LoadFromSystem(); err == nil {
 							systemClient = joycode.NewClient(creds.PtKey, creds.UserID)
-							systemClient.SetColorContext(creds.ColorBaseURL, creds.MasterBaseURL, creds.Tenant, creds.LoginType, creds.OrgFullName)
-							systemClient.SetModelCatalog(creds.Models, creds.ModelAdapters)
+							systemClient.SetContext(creds.Tenant, creds.LoginType, creds.OrgFullName)
+							systemClient.SetModelCatalog(creds.Models)
 							systemClient.SetTransport(sharedTransport)
 							syncCatalog(systemClient)
 							syncLiveCatalog(systemClient)
@@ -218,7 +211,6 @@ var serveCmd = &cobra.Command{
 				return currentSystemClient
 			}
 			srv.Resolver = resolver
-			anth.Resolver = resolver
 		}
 
 		// Background log cleanup goroutine (nil-guarded; s may be nil if store.Open failed)
@@ -246,7 +238,6 @@ var serveCmd = &cobra.Command{
 
 		mux := http.NewServeMux()
 		srv.RegisterRoutes(mux)
-		anth.RegisterRoutes(mux)
 
 		// Register dashboard API routes + static file serving
 		if s != nil {
@@ -291,9 +282,9 @@ var serveCmd = &cobra.Command{
 			fmt.Println("  ─────────────────────────────────────────────────")
 			fmt.Println()
 			fmt.Println("  Endpoints:")
-			fmt.Println("    POST /v1/chat/completions  — Chat (OpenAI format)")
-			fmt.Println("    POST /v1/responses         — Responses (OpenAI/GPT format)")
-			fmt.Println("    POST /v1/messages          — Chat (Anthropic/Claude Code format)")
+			fmt.Println("    POST /v1/chat/completions  — Chat Completions (OpenAI protocol)")
+			fmt.Println("    POST /v1/responses         — Responses (OpenAI protocol)")
+			fmt.Println("    POST /v1/messages          — Messages (Anthropic protocol)")
 			fmt.Println("    POST /v1/web-search        — Web Search")
 			fmt.Println("    POST /v1/rerank            — Rerank documents")
 			fmt.Println("    GET  /v1/models            — Model list")
@@ -381,7 +372,7 @@ func requestLogMiddleware(next http.Handler, s *store.Store) http.Handler {
 
 		// Assign request ID for log correlation
 		reqID := atomic.AddUint64(&requestCounter, 1)
-		r = anthropic.WithRequestID(r, reqID)
+		r = api.WithRequestID(r, reqID)
 
 		// Resolve account from API key/token (used for model, session tracking, logging)
 		var resolvedAccount *store.Account

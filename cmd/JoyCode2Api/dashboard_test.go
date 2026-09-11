@@ -247,15 +247,20 @@ func TestOpenAPIEndpoints(t *testing.T) {
 
 	base := fmt.Sprintf("http://localhost:%d", port)
 
-	// Test /v1/models (OpenAI endpoint)
+	// Test /v1/models (OpenAI endpoint). The list comes from JoyCode, so with
+	// dummy credentials the endpoint must report the upstream failure as-is
+	// instead of inventing a catalog; either way it is routed and answers JSON.
 	t.Run("v1_models", func(t *testing.T) {
 		resp, err := http.Get(base + "/v1/models")
 		if err != nil {
 			t.Fatalf("v1 models: %v", err)
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
-			t.Errorf("status = %d, want 200", resp.StatusCode)
+		if resp.StatusCode != 200 && resp.StatusCode != http.StatusBadGateway {
+			t.Errorf("status = %d, want 200 or 502", resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+			t.Errorf("content-type = %q, want JSON", ct)
 		}
 	})
 

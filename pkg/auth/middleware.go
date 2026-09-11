@@ -1,16 +1,11 @@
 package auth
 
 import (
-	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strings"
 )
-
-type contextKey string
-
-const usernameKey contextKey = "auth_username"
 
 type SettingsGetter interface {
 	GetSetting(key string) string
@@ -70,15 +65,13 @@ func JWTMiddleware(getter SettingsGetter, next http.Handler) http.Handler {
 			return
 		}
 
-		claims, err := ValidateToken(tokenStr, secret)
-		if err != nil {
+		if _, err := ValidateToken(tokenStr, secret); err != nil {
 			slog.Warn("auth: JWT validation failed", "error", err, "path", path)
 			writeAuthError(w, "invalid or expired token")
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), usernameKey, claims.Username)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -91,11 +84,4 @@ func writeAuthError(w http.ResponseWriter, msg string) {
 	if data, err := json.Marshal(map[string]string{"detail": msg}); err == nil {
 		w.Write(data)
 	}
-}
-
-func AuthenticatedUser(r *http.Request) string {
-	if v, ok := r.Context().Value(usernameKey).(string); ok {
-		return v
-	}
-	return ""
 }

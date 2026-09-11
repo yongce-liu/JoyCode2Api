@@ -252,6 +252,51 @@ func TestHandleUpdateModel(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateToken(t *testing.T) {
+	h, s := setupTestHandler(t)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	s.AddAccount("key1", "pt1", "user1", true, "")
+
+	req := makeRequest(t, "PUT", "/api/accounts/key1/token", map[string]interface{}{
+		"api_token": "my-own-token",
+	})
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	m := decodeJSON(t, w)
+	if m["api_token"] != "my-own-token" {
+		t.Errorf("returned token = %v, want my-own-token", m["api_token"])
+	}
+
+	a, _ := s.GetAccountByToken("my-own-token")
+	if a == nil || a.UserID != "key1" {
+		t.Errorf("stored account = %#v, want key1", a)
+	}
+}
+
+func TestHandleUpdateTokenRejectsInvalid(t *testing.T) {
+	h, s := setupTestHandler(t)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	s.AddAccount("key1", "pt1", "user1", true, "")
+
+	req := makeRequest(t, "PUT", "/api/accounts/key1/token", map[string]interface{}{
+		"api_token": "  ",
+	})
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
 // --- Models ---
 
 func TestModelInfosUseFrontendShape(t *testing.T) {

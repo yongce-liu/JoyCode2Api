@@ -74,12 +74,6 @@ func TestParsePluginState_FullFields(t *testing.T) {
 	if creds.Tenant != "JD" {
 		t.Errorf("Tenant = %q", creds.Tenant)
 	}
-	if creds.MasterBaseURL != "http://joycode-api-saas.jd.com" {
-		t.Errorf("MasterBaseURL = %q", creds.MasterBaseURL)
-	}
-	if creds.ColorBaseURL != "https://api-ai.jd.com" {
-		t.Errorf("ColorBaseURL = %q", creds.ColorBaseURL)
-	}
 	if creds.RealName != "测试用户" {
 		t.Errorf("RealName = %q", creds.RealName)
 	}
@@ -91,12 +85,6 @@ func TestParsePluginState_FullFields(t *testing.T) {
 		if creds.Models[i] != m {
 			t.Errorf("Models[%d] = %q, want %q", i, creds.Models[i], m)
 		}
-	}
-	if got := creds.ModelAdapters["GPT-5.6 Sol"]; got != "openai-response" {
-		t.Errorf("GPT adapter = %q", got)
-	}
-	if got := creds.ModelAdapters["Claude-Opus-4.7-hq"]; got != "anthropic" {
-		t.Errorf("Claude adapter = %q", got)
 	}
 }
 

@@ -3,6 +3,7 @@ package joycode
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -27,33 +28,51 @@ const (
 	UserAgent     = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
 		"AppleWebKit/537.36 (KHTML, like Gecko) " +
 		"JoyCode/2.7.5 Chrome/133.0.0.0 Electron/35.2.0 Safari/537.36"
+)
 
-	// color gateway 签名（逆向自 JoyCode 2.7.5 / joycoder-editor 3.8.57）
+// Upstream endpoints, one per JoyCode API the proxy exposes. The editor plugin
+// calls these paths directly with the ptKey header; the proxy relays to the
+// same paths instead of rewriting them, so the endpoint table is the upstream
+// table. chat, web-search, modelList and userInfo are the v2 routes the plugin
+// uses today; responses and messages only exist under their own version.
+const (
+	EndpointChatCompletions = "/api/saas/openai/v2/chat/completions"
+	EndpointResponses       = "/api/saas/openai/v1/responses"
+	EndpointMessages        = "/api/saas/anthropic/v1/messages"
+	EndpointModelList       = "/api/saas/models/v2/modelList"
+	EndpointUserInfo        = "/api/saas/user/v2/userInfo"
+	EndpointWebSearch       = "/api/saas/openai/v2/web-search"
+	EndpointRerank          = "/api/saas/openai/v2/rerank"
+)
+
+// BaseURL is the JoyCode origin requests are sent to by default. It is the
+// saas host the editor plugin itself talks to.
+var BaseURL = envOr("JOYCODE_BASE_URL", "http://joycode-api-saas.jd.com")
+
+// GatewayURL switches upstream traffic to the public color gateway. The gateway
+// routes by functionId and authenticates the caller with an HMAC signature
+// instead of exposing /api/saas paths, so it is the route available outside the
+// JD intranet. Empty (the default) talks to BaseURL directly.
+var GatewayURL = envOr("JOYCODE_GATEWAY_URL", "")
+
+// color gateway signing material (逆向自 JoyCode 2.7.5 / joycoder-editor 3.8.57).
+const (
 	colorGatewayAppID = "joycode_ide"
 	colorGatewayPath  = "/api"
 	colorHMACKey      = "0691a3f0b37b4a85aeb63ad0fc7db3ed"
 )
 
-var (
-	BaseURL             = envOr("JOYCODE_BASE_URL", "https://joycode-api.jd.com")
-	SaasBaseURL         = envOr("JOYCODE_SAAS_BASE_URL", "http://joycode-api-saas.jd.com")
-	DefaultColorBaseURL = envOr("JOYCODE_COLOR_BASE_URL", "https://api-ai.jd.com")
-)
-
-// colorEndpoint 把旧 v1 路径映射到 (functionId, v2 路径)。
-// gateway 模式靠 query 的 functionId 路由；direct 模式用 v2 路径。
-type colorEndpoint struct {
-	functionID string
-	v2Path     string
-}
-
-var colorEndpoints = map[string]colorEndpoint{
-	"/api/saas/openai/v1/chat/completions": {"chat_completions", "/api/saas/openai/v2/chat/completions"},
-	"/api/saas/openai/v1/responses":        {"responses_completions", "/api/saas/openai/v1/responses"},
-	"/api/saas/models/v1/modelList":        {"joycode_modelList", "/api/saas/models/v2/modelList"},
-	"/api/saas/openai/v1/web-search":       {"web_search", "/api/saas/openai/v2/web-search"},
-	"/api/saas/user/v1/userInfo":           {"joycode_userInfo", "/api/saas/user/v2/userInfo"},
-	"/api/saas/anthropic/v1/messages":      {"anthropic_completions", "/api/saas/anthropic/v1/messages"},
+// gatewayFunctionID maps an upstream endpoint to the color gateway functionId
+// that serves it. Every endpoint the proxy exposes has a functionId except
+// rerank, which the gateway does not publish: an unmapped endpoint is reported
+// instead of being sent to a guess.
+var gatewayFunctionID = map[string]string{
+	EndpointChatCompletions: "chat_completions",
+	EndpointResponses:       "responses_completions",
+	EndpointMessages:        "anthropic_completions",
+	EndpointModelList:       "joycode_modelList",
+	EndpointUserInfo:        "joycode_userInfo",
+	EndpointWebSearch:       "web_search",
 }
 
 var Models = []string{
@@ -69,35 +88,26 @@ var Models = []string{
 }
 
 type Client struct {
-	PtKey          string
-	AnthropicPtKey string
-	UserID         string
-	SessionID      string
-	ColorBaseURL   string
-	MasterBaseURL  string
-	Tenant         string
-	LoginType      string
-	OrgFullName    string
-	Native         *NativeContext
-	Models         []string
-	ModelAdapters  map[string]string
-	httpClient     *http.Client
+	PtKey       string
+	UserID      string
+	SessionID   string
+	Tenant      string
+	LoginType   string
+	OrgFullName string
+	Native      *NativeContext
+	Models      []string
+	httpClient  *http.Client
 }
 
-// NativeContext optionally overrides account authentication and tenant routing
-// for plugin-native adapters such as Anthropic Messages and GPT Responses.
+// NativeContext optionally overrides account authentication for plugin-native
+// adapters such as Anthropic Messages and GPT Responses, where JoyCode expects
+// the editor plugin login rather than the account's own credentials.
 type NativeContext struct {
-	PtKey         string
-	LoginType     string
-	ColorBaseURL  string
-	MasterBaseURL string
-	Tenant        string
-	OrgFullName   string
+	PtKey       string
+	LoginType   string
+	Tenant      string
+	OrgFullName string
 }
-
-// AnthropicContext is kept as an alias for callers compiled against the
-// earlier Claude-only implementation.
-type AnthropicContext = NativeContext
 
 type gzipReadCloser struct {
 	io.Reader
@@ -133,20 +143,14 @@ func envOr(key, fallback string) string {
 
 func NewClient(ptKey, userID string) *Client {
 	return &Client{
-		PtKey:        ptKey,
-		UserID:       userID,
-		SessionID:    newHexID(),
-		ColorBaseURL: DefaultColorBaseURL,
+		PtKey:     ptKey,
+		UserID:    userID,
+		SessionID: newHexID(),
 		httpClient: &http.Client{
 			Timeout:   30 * time.Minute,
 			Transport: defaultTransport,
 		},
 	}
-}
-
-// SetHTTPClient replaces the internal HTTP client. Intended for testing.
-func (c *Client) SetHTTPClient(hc *http.Client) {
-	c.httpClient = hc
 }
 
 func (c *Client) SetTimeout(d time.Duration) {
@@ -157,38 +161,19 @@ func (c *Client) SetTransport(transport http.RoundTripper) {
 	c.httpClient.Transport = transport
 }
 
-func (c *Client) SetAnthropicPtKey(ptKey string) {
-	c.AnthropicPtKey = ptKey
-}
-
-// SetAnthropicContext pins the full client-login context used for native
-// Anthropic (Claude) requests. It supersedes SetAnthropicPtKey: headers,
-// body metadata and gateway routing all follow this context.
-func (c *Client) SetAnthropicContext(ctx AnthropicContext) {
-	c.SetNativeContext(ctx)
-}
-
-// SetNativeContext pins the editor plugin login used by native model adapters.
+// SetNativeContext pins the editor plugin login used when the caller's account
+// has plugin credentials available.
 func (c *Client) SetNativeContext(ctx NativeContext) {
 	c.Native = &ctx
 }
 
 // SetModelCatalog records the live plugin catalog on the system client.
-func (c *Client) SetModelCatalog(models []string, adapters map[string]string) {
+func (c *Client) SetModelCatalog(models []string) {
 	c.Models = append([]string(nil), models...)
-	c.ModelAdapters = make(map[string]string, len(adapters))
-	for model, adapter := range adapters {
-		c.ModelAdapters[model] = adapter
-	}
 }
 
-// SetColorContext sets the color-gateway routing context from login credentials.
-// Empty colorBaseURL keeps the default gateway origin.
-func (c *Client) SetColorContext(colorBaseURL, masterBaseURL, tenant, loginType, orgFullName string) {
-	if colorBaseURL != "" {
-		c.ColorBaseURL = colorBaseURL
-	}
-	c.MasterBaseURL = masterBaseURL
+// SetContext records the tenant metadata carried by the login credentials.
+func (c *Client) SetContext(tenant, loginType, orgFullName string) {
 	c.Tenant = tenant
 	c.LoginType = loginType
 	c.OrgFullName = orgFullName
@@ -200,91 +185,51 @@ func newHexID() string {
 	return hex.EncodeToString(b)
 }
 
-// colorSign 构造 color gateway 的 query 串与 HMAC 签名。
-// 规范串 = 参数按 key 排序后的 value 拼接（appid < functionId < t）。
+// endpointURL resolves an upstream endpoint to the URL it is sent to: the
+// signed color-gateway URL when deployment configured one, otherwise the plain
+// saas path.
+func (c *Client) endpointURL(endpoint string) (string, error) {
+	if GatewayURL == "" {
+		return strings.TrimRight(BaseURL, "/") + endpoint, nil
+	}
+	functionID, ok := gatewayFunctionID[endpoint]
+	if !ok {
+		return "", fmt.Errorf("endpoint %s has no color gateway functionId", endpoint)
+	}
+	origin, err := url.Parse(GatewayURL)
+	if err != nil || origin.Host == "" {
+		return "", fmt.Errorf("invalid JOYCODE_GATEWAY_URL %q", GatewayURL)
+	}
+	query, sign := colorSign(functionID)
+	return origin.Scheme + "://" + origin.Host + strings.TrimRight(origin.Path, "/") +
+		colorGatewayPath + "?" + query + "&sign=" + sign, nil
+}
+
+// colorSign builds the signed query the color gateway authenticates. The signed
+// string is the appid, functionId and millisecond timestamp joined with "&",
+// while the query carries them in that same order; the signature is appended
+// separately so the signed string never includes it.
 func colorSign(functionID string) (query, sign string) {
 	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
-	signStr := colorGatewayAppID + "&" + functionID + "&" + ts
 	mac := hmac.New(sha256.New, []byte(colorHMACKey))
-	mac.Write([]byte(signStr))
+	mac.Write([]byte(colorGatewayAppID + "&" + functionID + "&" + ts))
 	sign = hex.EncodeToString(mac.Sum(nil))
 	query = "appid=" + colorGatewayAppID + "&functionId=" + functionID + "&t=" + ts
 	return query, sign
 }
 
-// requestURL 根据登录态把端点解析为最终请求 URL。
-func (c *Client) requestURL(endpoint string) string {
-	return buildRequestURL(endpoint, c.ColorBaseURL, c.MasterBaseURL)
-}
-
-// nativeRequestURL resolves an endpoint against the pinned plugin context when
-// present, otherwise it falls back to the client's own routing context.
-func (c *Client) nativeRequestURL(endpoint string) string {
-	if actx := c.Native; actx != nil && (actx.ColorBaseURL != "" || actx.MasterBaseURL != "") {
-		color := actx.ColorBaseURL
-		if color == "" {
-			color = c.ColorBaseURL
-		}
-		master := actx.MasterBaseURL
-		if master == "" {
-			master = c.MasterBaseURL
-		}
-		return buildRequestURL(endpoint, color, master)
-	}
-	return c.requestURL(endpoint)
-}
-
-// buildRequestURL 根据登录态把端点解析为最终请求 URL。
-// 有 colorBaseURL → gateway 模式（带签名，functionId 路由）；否则 direct v2（无签名）。
-func buildRequestURL(endpoint, colorBaseURL, masterBaseURL string) string {
-	ep, ok := colorEndpoints[endpoint]
-	if !ok {
-		// 未在 color 端点表中的旧端点（如已下线的 rerank），保持 direct 行为
-		return BaseURL + endpoint
-	}
-	if colorBaseURL != "" {
-		if u, err := url.Parse(colorBaseURL); err == nil && u.Host != "" {
-			basePath := strings.TrimRight(u.Path, "/")
-			query, sign := colorSign(ep.functionID)
-			return u.Scheme + "://" + u.Host + basePath + colorGatewayPath + "?" + query + "&sign=" + sign
-		}
-	}
-	base := masterBaseURL
-	if base == "" {
-		base = BaseURL
-	}
-	return strings.TrimRight(base, "/") + ep.v2Path
-}
-
+// headers builds the headers JoyCode authenticates a request with. A pinned
+// plugin login wins over the account credentials; the login type is only
+// guessed when the credentials do not carry one, because the editor plugin key
+// authenticates as ERP while browser accounts authenticate as PIN_JD_CLOUD.
 func (c *Client) headers() http.Header {
-	loginType := c.LoginType
-	if loginType == "" {
-		loginType = "N_PIN_PC"
-	}
-	return http.Header{
-		"Content-Type":    {"application/json; charset=UTF-8"},
-		"source-type":     {"joycoder-ide"},
-		"ptKey":           {c.PtKey},
-		"loginType":       {loginType},
-		"User-Agent":      {UserAgent},
-		"Accept":          {"*/*"},
-		"Accept-Encoding": {"gzip, deflate"},
-		"Accept-Language": {"zh-CN,zh;q=0.9,en;q=0.8"},
-	}
-}
-
-func (c *Client) anthropicHeaders() http.Header {
-	ptKey := c.PtKey
-	if c.AnthropicPtKey != "" {
-		ptKey = c.AnthropicPtKey
-	}
-	loginType := c.LoginType
-	if actx := c.Native; actx != nil {
-		if actx.PtKey != "" {
-			ptKey = actx.PtKey
+	ptKey, loginType := c.PtKey, c.LoginType
+	if n := c.Native; n != nil {
+		if n.PtKey != "" {
+			ptKey = n.PtKey
 		}
-		if actx.LoginType != "" {
-			loginType = actx.LoginType
+		if n.LoginType != "" {
+			loginType = n.LoginType
 		}
 	}
 	if loginType == "" {
@@ -294,38 +239,41 @@ func (c *Client) anthropicHeaders() http.Header {
 			loginType = "PIN_JD_CLOUD"
 		}
 	}
-	return http.Header{
-		"Content-Type":    {"application/json; charset=utf-8"},
-		"source-type":     {"joycoder-ide"},
-		"ptKey":           {ptKey},
-		"loginType":       {loginType},
-		"User-Agent":      {UserAgent},
-		"Accept":          {"*/*"},
-		"Accept-Encoding": {"gzip, deflate"},
-		"Accept-Language": {"zh-CN,zh;q=0.9,en;q=0.8"},
-	}
+	h := http.Header{}
+	h.Set("Content-Type", "application/json; charset=utf-8")
+	h.Set("Source-Type", "joycoder-ide")
+	h.Set("ptKey", ptKey)
+	h.Set("loginType", loginType)
+	h.Set("User-Agent", UserAgent)
+	h.Set("Accept", "*/*")
+	// gzip is never requested: a gzip block is only readable once complete,
+	// which would hold back every SSE event.
+	h.Set("Accept-Encoding", "identity")
+	h.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	return h
 }
 
-func (c *Client) prepareBody(extra map[string]interface{}) map[string]interface{} {
-	tenant := c.Tenant
-	if tenant == "" {
-		tenant = "JOYCODE"
-	}
-	body := map[string]interface{}{
-		"tenant":        tenant,
-		"orgFullName":   c.OrgFullName,
-		"userId":        c.UserID,
-		"client":        "JoyCode",
-		"clientVersion": ClientVersion,
-		"language":      "UNKNOWN",
-	}
-	for k, v := range extra {
-		body[k] = v
-	}
-	return body
-}
+// Protocol identifies which JoyCode API a request belongs to. It selects the
+// metadata defaults only: headers, endpoint resolution and the payload itself
+// are the same for every protocol.
+type Protocol int
 
-func (c *Client) prepareAnthropicBody(extra map[string]interface{}) map[string]interface{} {
+const (
+	ProtocolOpenAI Protocol = iota
+	ProtocolAnthropic
+)
+
+// mergeMetadata adds the plugin metadata JoyCode requires to a client payload.
+// The payload is decoded into raw fields so nested values (tools, thinking,
+// images, ...) are re-serialized as the client sent them; a field the client
+// already provided always wins over the defaults.
+func (c *Client) mergeMetadata(payload []byte, protocol Protocol) ([]byte, error) {
+	fields := map[string]json.RawMessage{}
+	if len(payload) > 0 {
+		if err := json.Unmarshal(payload, &fields); err != nil {
+			return nil, fmt.Errorf("request body must be a JSON object: %w", err)
+		}
+	}
 	tenant := c.Tenant
 	orgFullName := c.OrgFullName
 	if actx := c.Native; actx != nil {
@@ -337,110 +285,13 @@ func (c *Client) prepareAnthropicBody(extra map[string]interface{}) map[string]i
 		}
 	}
 	if tenant == "" {
-		tenant = "JD"
-	}
-	body := map[string]interface{}{
-		"tenant":        tenant,
-		"orgFullName":   orgFullName,
-		"userId":        c.UserID,
-		"client":        "JoyCode",
-		"clientVersion": ClientVersion,
-		"language":      "UNKNOWN",
-		"stream":        true,
-	}
-	for k, v := range extra {
-		body[k] = v
-	}
-	return body
-}
-
-func (c *Client) doPost(endpoint string, body map[string]interface{}) (*http.Response, error) {
-	data, err := json.Marshal(body)
-	if err != nil {
-		slog.Error("marshal request body", "endpoint", endpoint, "error", err)
-		return nil, err
-	}
-	req, err := http.NewRequest("POST", c.requestURL(endpoint), bytes.NewReader(data))
-	if err != nil {
-		slog.Error("create request", "endpoint", endpoint, "error", err)
-		return nil, err
-	}
-	req.Header = c.headers()
-	return c.httpClient.Do(req)
-}
-
-// doPostStream is like doPost but disables Accept-Encoding: gzip so the
-// upstream returns raw (uncompressed) SSE. gzip.Reader buffers an entire
-// gzip block before yielding any bytes, which breaks chunk-by-chunk
-// streaming — the client sees all data arrive at once after a long delay.
-func (c *Client) doPostStream(endpoint string, body map[string]interface{}) (*http.Response, error) {
-	data, err := json.Marshal(body)
-	if err != nil {
-		slog.Error("marshal stream request body", "endpoint", endpoint, "error", err)
-		return nil, err
-	}
-	req, err := http.NewRequest("POST", c.requestURL(endpoint), bytes.NewReader(data))
-	if err != nil {
-		slog.Error("create stream request", "endpoint", endpoint, "error", err)
-		return nil, err
-	}
-	h := c.headers()
-	h.Set("Accept-Encoding", "identity") // no gzip for streaming
-	req.Header = h
-	return c.httpClient.Do(req)
-}
-
-func (c *Client) doAnthropicPost(endpoint string, body map[string]interface{}) (*http.Response, error) {
-	data, err := json.Marshal(body)
-	if err != nil {
-		slog.Error("marshal anthropic request body", "endpoint", endpoint, "error", err)
-		return nil, err
-	}
-	req, err := http.NewRequest("POST", c.nativeRequestURL(endpoint), bytes.NewReader(data))
-	if err != nil {
-		slog.Error("create anthropic request", "endpoint", endpoint, "error", err)
-		return nil, err
-	}
-	req.Header = c.anthropicHeaders()
-	return c.httpClient.Do(req)
-}
-
-// doAnthropicPostStream is like doAnthropicPost but disables gzip for the
-// same reason as doPostStream — see its comment for details.
-func (c *Client) doAnthropicPostStream(endpoint string, body map[string]interface{}) (*http.Response, error) {
-	data, err := json.Marshal(body)
-	if err != nil {
-		slog.Error("marshal anthropic stream request body", "endpoint", endpoint, "error", err)
-		return nil, err
-	}
-	req, err := http.NewRequest("POST", c.nativeRequestURL(endpoint), bytes.NewReader(data))
-	if err != nil {
-		slog.Error("create anthropic stream request", "endpoint", endpoint, "error", err)
-		return nil, err
-	}
-	h := c.anthropicHeaders()
-	h.Set("Accept-Encoding", "identity")
-	req.Header = h
-	return c.httpClient.Do(req)
-}
-
-// prepareNativeBody adds the plugin metadata required by native model adapters
-// while preserving the caller's stream choice.
-func (c *Client) prepareNativeBody(extra map[string]interface{}) map[string]interface{} {
-	tenant := c.Tenant
-	orgFullName := c.OrgFullName
-	if ctx := c.Native; ctx != nil {
-		if ctx.Tenant != "" {
-			tenant = ctx.Tenant
-		}
-		if ctx.OrgFullName != "" {
-			orgFullName = ctx.OrgFullName
+		if protocol == ProtocolAnthropic || looksLikePluginPtKey(c.PtKey) {
+			tenant = "JD"
+		} else {
+			tenant = "JOYCODE"
 		}
 	}
-	if tenant == "" && looksLikePluginPtKey(c.PtKey) {
-		tenant = "JD"
-	}
-	body := map[string]interface{}{
+	defaults := map[string]interface{}{
 		"tenant":        tenant,
 		"orgFullName":   orgFullName,
 		"userId":        c.UserID,
@@ -448,64 +299,94 @@ func (c *Client) prepareNativeBody(extra map[string]interface{}) map[string]inte
 		"clientVersion": ClientVersion,
 		"language":      "UNKNOWN",
 	}
-	for k, v := range extra {
-		body[k] = v
-	}
-	return body
-}
-
-func (c *Client) nativeHeaders() http.Header {
-	h := c.headers()
-	if ctx := c.Native; ctx != nil {
-		if ctx.PtKey != "" {
-			h["ptKey"] = []string{ctx.PtKey}
+	for key, value := range defaults {
+		if _, present := fields[key]; present {
+			continue
 		}
-		if ctx.LoginType != "" {
-			h["loginType"] = []string{ctx.LoginType}
-		}
-	}
-	if c.Native == nil && looksLikePluginPtKey(c.PtKey) {
-		h["loginType"] = []string{"ERP"}
-	}
-	return h
-}
-
-// looksLikePluginPtKey recognizes the short-lived key stored by the editor
-// plugin. Current plugin keys are 52 characters, while browser/IDE pt_keys are
-// substantially longer. A narrow range avoids changing legacy test/manual keys.
-func looksLikePluginPtKey(key string) bool {
-	return len(key) >= 48 && len(key) <= 64
-}
-
-func (c *Client) doNativePost(endpoint string, body map[string]interface{}, stream bool) (*http.Response, error) {
-	data, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequest("POST", c.nativeRequestURL(endpoint), bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	h := c.nativeHeaders()
-	if stream {
-		h.Set("Accept-Encoding", "identity")
-	}
-	req.Header = h
-	return c.httpClient.Do(req)
-}
-
-func decodeBody(resp *http.Response) ([]byte, error) {
-	defer resp.Body.Close()
-	var r io.Reader = resp.Body
-	if resp.Header.Get("Content-Encoding") == "gzip" {
-		gz, err := gzip.NewReader(resp.Body)
+		raw, err := json.Marshal(value)
 		if err != nil {
 			return nil, err
 		}
-		defer gz.Close()
-		r = gz
+		fields[key] = raw
 	}
-	return io.ReadAll(r)
+	return json.Marshal(fields)
+}
+
+// Forward posts a client payload to a JoyCode endpoint and returns the raw
+// upstream response. Nothing is rewritten on the way back: the caller relays
+// status, headers and body verbatim, so an upstream error reaches the client
+// exactly as the upstream sent it.
+func (c *Client) Forward(endpoint string, protocol Protocol, payload []byte) (*http.Response, error) {
+	return c.ForwardContext(context.Background(), endpoint, protocol, payload)
+}
+
+// ForwardContext is Forward bound to a caller context. A relayed request must
+// carry the client's context: when the client gives up, the upstream call has
+// to be cancelled too, otherwise an abandoned request keeps its upstream
+// connection (and the connection slot it holds) for as long as the upstream
+// takes to answer.
+func (c *Client) ForwardContext(ctx context.Context, endpoint string, protocol Protocol, payload []byte) (*http.Response, error) {
+	body, err := c.mergeMetadata(payload, protocol)
+	if err != nil {
+		return nil, err
+	}
+	target, err := c.endpointURL(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header = c.headers()
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if err := decodeStreamBody(resp); err != nil {
+		resp.Body.Close()
+		return nil, err
+	}
+	return resp, nil
+}
+
+// postJSON posts a small JSON payload and decodes the upstream JSON response.
+// It backs the account helpers (model list, user info, search, rerank) that
+// need a value rather than a byte-for-byte relay.
+func (c *Client) postJSON(endpoint string, payload map[string]interface{}) (map[string]interface{}, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.Forward(endpoint, ProtocolOpenAI, raw)
+	if err != nil {
+		slog.Error("upstream request failed", "endpoint", endpoint, "error", err)
+		return nil, err
+	}
+	data, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		slog.Error("decode upstream response", "endpoint", endpoint, "status", resp.StatusCode, "error", err)
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		slog.Error("upstream non-200", "endpoint", endpoint, "status", resp.StatusCode, "body", common.Truncate(string(data), 500))
+		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(data))
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(data, &result); err != nil {
+		slog.Error("unmarshal upstream response", "endpoint", endpoint, "error", err)
+		return nil, fmt.Errorf("invalid JSON response (parse error: %s): %s", err.Error(), common.Truncate(string(data), 500))
+	}
+	return result, nil
+}
+
+// looksLikePluginPtKey recognizes the key the editor plugin stores, which
+// authenticates as ERP. Plugin keys are around 50-80 characters, while
+// browser/IDE pt_keys are substantially longer; the range stays well below the
+// browser length so an account key is never mistaken for a plugin one.
+func looksLikePluginPtKey(key string) bool {
+	return len(key) >= 48 && len(key) <= 96
 }
 
 func decodeStreamBody(resp *http.Response) error {
@@ -521,109 +402,8 @@ func decodeStreamBody(resp *http.Response) error {
 	return nil
 }
 
-func (c *Client) Post(endpoint string, body map[string]interface{}) (map[string]interface{}, error) {
-	resp, err := c.doPost(endpoint, c.prepareBody(body))
-	if err != nil {
-		slog.Error("upstream request failed", "endpoint", endpoint, "error", err)
-		return nil, err
-	}
-	data, err := decodeBody(resp)
-	if err != nil {
-		slog.Error("decode upstream response", "endpoint", endpoint, "status", resp.StatusCode, "error", err)
-		return nil, err
-	}
-	if resp.StatusCode != 200 {
-		slog.Error("upstream non-200", "endpoint", endpoint, "status", resp.StatusCode, "body", truncate(string(data), 500))
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(data))
-	}
-	var result map[string]interface{}
-	if err := json.Unmarshal(data, &result); err != nil {
-		slog.Error("unmarshal upstream response", "endpoint", endpoint, "error", err)
-		return nil, fmt.Errorf("invalid JSON response (parse error: %s): %s", err.Error(), truncate(string(data), 500))
-	}
-	return result, nil
-}
-
-func (c *Client) PostStream(endpoint string, body map[string]interface{}) (*http.Response, error) {
-	resp, err := c.doPostStream(endpoint, c.prepareBody(body))
-	if err != nil {
-		slog.Error("upstream stream connect", "endpoint", endpoint, "error", err)
-		return nil, err
-	}
-	if resp.StatusCode != 200 {
-		defer resp.Body.Close()
-		data, _ := io.ReadAll(resp.Body)
-		slog.Error("upstream stream non-200", "endpoint", endpoint, "status", resp.StatusCode, "body", truncate(string(data), 500))
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(data))
-	}
-	if err := decodeStreamBody(resp); err != nil {
-		resp.Body.Close()
-		return nil, err
-	}
-	return resp, nil
-}
-
-func (c *Client) PostAnthropicStream(endpoint string, body map[string]interface{}) (*http.Response, error) {
-	resp, err := c.doAnthropicPostStream(endpoint, c.prepareAnthropicBody(body))
-	if err != nil {
-		slog.Error("upstream anthropic stream connect", "endpoint", endpoint, "error", err)
-		return nil, err
-	}
-	if resp.StatusCode != 200 {
-		defer resp.Body.Close()
-		data, _ := io.ReadAll(resp.Body)
-		slog.Error("upstream anthropic stream non-200", "endpoint", endpoint, "status", resp.StatusCode, "body", truncate(string(data), 500))
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(data))
-	}
-	if err := decodeStreamBody(resp); err != nil {
-		resp.Body.Close()
-		return nil, err
-	}
-	return resp, nil
-}
-
-// PostNative calls a native JSON endpoint using the account credentials, with
-// an optional plugin context override when one is available.
-func (c *Client) PostNative(endpoint string, body map[string]interface{}) (map[string]interface{}, error) {
-	resp, err := c.doNativePost(endpoint, c.prepareNativeBody(body), false)
-	if err != nil {
-		return nil, err
-	}
-	data, err := decodeBody(resp)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(data))
-	}
-	var result map[string]interface{}
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("invalid JSON response (parse error: %s): %s", err.Error(), truncate(string(data), 500))
-	}
-	return result, nil
-}
-
-// PostNativeStream calls a native SSE endpoint without gzip buffering, using
-// the account credentials unless a plugin context override is available.
-func (c *Client) PostNativeStream(endpoint string, body map[string]interface{}) (*http.Response, error) {
-	resp, err := c.doNativePost(endpoint, c.prepareNativeBody(body), true)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		data, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(data))
-	}
-	if err := decodeStreamBody(resp); err != nil {
-		resp.Body.Close()
-		return nil, err
-	}
-	return resp, nil
-}
-
 func (c *Client) ListModels() ([]ModelInfo, error) {
-	resp, err := c.Post("/api/saas/models/v1/modelList", map[string]interface{}{})
+	resp, err := c.postJSON(EndpointModelList, map[string]interface{}{})
 	if err != nil {
 		return nil, err
 	}
@@ -651,7 +431,7 @@ func (c *Client) WebSearch(query string) ([]interface{}, error) {
 		"messages": []map[string]string{{"role": "user", "content": query}},
 		"stream":   false, "model": "search_pro_jina", "language": "UNKNOWN",
 	}
-	resp, err := c.Post("/api/saas/openai/v1/web-search", body)
+	resp, err := c.postJSON(EndpointWebSearch, body)
 	if err != nil {
 		return nil, err
 	}
@@ -660,14 +440,14 @@ func (c *Client) WebSearch(query string) ([]interface{}, error) {
 }
 
 func (c *Client) Rerank(query string, documents []string, topN int) (map[string]interface{}, error) {
-	return c.Post("/api/saas/openai/v1/rerank", map[string]interface{}{
+	return c.postJSON(EndpointRerank, map[string]interface{}{
 		"model": "Qwen3-Reranker-8B", "query": query,
 		"documents": documents, "top_n": topN,
 	})
 }
 
 func (c *Client) UserInfo() (map[string]interface{}, error) {
-	return c.Post("/api/saas/user/v1/userInfo", map[string]interface{}{})
+	return c.postJSON(EndpointUserInfo, map[string]interface{}{})
 }
 
 func (c *Client) Validate() error {
@@ -709,8 +489,4 @@ func (c *Client) UserInfoWithRefresh() (string, error) {
 		return ptKey, nil
 	}
 	return "", nil
-}
-
-func truncate(s string, maxLen int) string {
-	return common.Truncate(s, maxLen)
 }

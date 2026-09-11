@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 
 	"github.com/spf13/cobra"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
@@ -42,11 +44,24 @@ var chatCmd = &cobra.Command{
 			body["stream"] = true
 			return streamChat(client, body)
 		}
-		resp, err := client.Post("/api/saas/openai/v1/chat/completions", body)
+		payload, err := json.Marshal(body)
 		if err != nil {
 			return err
 		}
-		choices, _ := resp["choices"].([]interface{})
+		resp, err := client.Forward(joycode.EndpointChatCompletions, joycode.ProtocolOpenAI, payload)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+		var result map[string]interface{}
+		if err := json.Unmarshal(data, &result); err != nil {
+			return fmt.Errorf("上游返回了非 JSON 响应 (HTTP %d): %s", resp.StatusCode, string(data))
+		}
+		choices, _ := result["choices"].([]interface{})
 		if len(choices) > 0 {
 			choice, _ := choices[0].(map[string]interface{})
 			msg, _ := choice["message"].(map[string]interface{})
@@ -58,7 +73,11 @@ var chatCmd = &cobra.Command{
 }
 
 func streamChat(client *joycode.Client, body map[string]interface{}) error {
-	resp, err := client.PostStream("/api/saas/openai/v1/chat/completions", body)
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Forward(joycode.EndpointChatCompletions, joycode.ProtocolOpenAI, payload)
 	if err != nil {
 		return err
 	}

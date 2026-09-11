@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -452,15 +451,6 @@ func generateRandomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-func formatKeys(m map[string]interface{}) string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return strings.Join(keys, ",")
-}
-
 func setCors(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
@@ -595,7 +585,7 @@ func (h *Handler) handleAutoLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := joycode.NewClient(creds.PtKey, creds.UserID)
-	client.SetColorContext(creds.ColorBaseURL, creds.MasterBaseURL, creds.Tenant, creds.LoginType, creds.OrgFullName)
+	client.SetContext(creds.Tenant, creds.LoginType, creds.OrgFullName)
 	userInfo, err := client.UserInfo()
 	if err != nil {
 		slog.Error("auto-login: userInfo request failed", "user_id", creds.UserID, "error", err)
@@ -663,11 +653,6 @@ func (h *Handler) handleAutoLogin(w http.ResponseWriter, r *http.Request) {
 	if len(creds.Models) > 0 {
 		if err := h.store.SetSetting("available_models", strings.Join(creds.Models, ",")); err != nil {
 			slog.Warn("auto-login: persist model catalog failed", "error", err)
-		}
-		if data, err := json.Marshal(creds.ModelAdapters); err == nil {
-			if err := h.store.SetSetting("model_adapters", string(data)); err != nil {
-				slog.Warn("auto-login: persist model adapters failed", "error", err)
-			}
 		}
 	}
 
@@ -1082,6 +1067,8 @@ func (h *Handler) handleAccountAction(w http.ResponseWriter, r *http.Request) {
 		h.getAccountLogs(w, r, apiKey)
 	case action == "renew-token" && r.Method == http.MethodPost:
 		h.renewToken(w, r, apiKey)
+	case action == "token" && r.Method == http.MethodPut:
+		h.updateToken(w, r, apiKey)
 	case action == "remark" && r.Method == http.MethodPut:
 		h.updateRemark(w, r, apiKey)
 	default:
@@ -1244,6 +1231,25 @@ func (h *Handler) renewToken(w http.ResponseWriter, r *http.Request, apiKey stri
 	if err != nil {
 		slog.Error("renew token", "api_key", apiKey, "error", err)
 		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "api_token": token})
+}
+
+// updateToken sets a user-supplied custom api_token for an account. Clients
+// authenticate with this token, so the store rejects empty, header-unsafe and
+// duplicate values with a 400 instead of silently keeping the old one.
+func (h *Handler) updateToken(w http.ResponseWriter, r *http.Request, apiKey string) {
+	var body struct {
+		APIToken string `json:"api_token"`
+	}
+	if !readJSONBody(w, r, &body) {
+		return
+	}
+	token, err := h.store.SetAPIToken(apiKey, body.APIToken)
+	if err != nil {
+		slog.Error("update custom token", "user_id", apiKey, "error", err)
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "api_token": token})

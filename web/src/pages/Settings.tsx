@@ -46,27 +46,11 @@ const FIELD_GROUPS = [
           { label: 'Doubao-Seed-2.0-pro — 豆包 Seed 2.0 Pro', value: 'Doubao-Seed-2.0-pro' },
         ],
       },
-      {
-        key: 'default_max_tokens',
-        label: '默认最大输出 Token',
-        tooltip: '客户端未指定 max_tokens 时的默认值。更大值允许更长回复，但消耗更多配额',
-        placeholder: '8192',
-        type: 'number' as const,
-        tag: '已生效',
-      },
     ],
   },
   {
     title: '连接优化',
     fields: [
-      {
-        key: 'max_retries',
-        label: '最大重试次数',
-        tooltip: '请求失败时的自动重试次数。网络不稳定时可适当增加',
-        placeholder: '3',
-        type: 'number' as const,
-        tag: '已生效',
-      },
       {
         key: 'request_timeout',
         label: '请求超时（秒）',

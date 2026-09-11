@@ -818,6 +818,57 @@ func (s *Store) RenewToken(userID string) (string, error) {
 	return token, nil
 }
 
+// MaxAPITokenLen bounds a user-supplied custom token so it stays well within
+// what HTTP header values and the dashboard UI can carry.
+const MaxAPITokenLen = 128
+
+// SetAPIToken stores a user-supplied custom api_token for an account. The
+// token is what clients send as x-api-key / Authorization: Bearer, so it must
+// be non-empty, header-safe (no whitespace or control characters) and unique
+// across accounts. The normalized token is returned.
+func (s *Store) SetAPIToken(userID, token string) (string, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", fmt.Errorf("token 不能为空")
+	}
+	if len(token) > MaxAPITokenLen {
+		return "", fmt.Errorf("token 长度不能超过 %d 个字符", MaxAPITokenLen)
+	}
+	for _, r := range token {
+		if r <= ' ' || r == 0x7f {
+			return "", fmt.Errorf("token 不能包含空格或控制字符")
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var owner string
+	err := s.db.QueryRow("SELECT user_id FROM accounts WHERE api_token = ?", token).Scan(&owner)
+	switch {
+	case err == nil && owner != userID:
+		return "", fmt.Errorf("该 token 已被账号 %s 使用", owner)
+	case err != nil && err != sql.ErrNoRows:
+		slog.Error("store: check token uniqueness failed", "user_id", userID, "error", err)
+		return "", err
+	}
+
+	result, err := s.db.Exec(
+		"UPDATE accounts SET api_token = ?, updated_at = datetime('now', 'localtime') WHERE user_id = ?",
+		token, userID,
+	)
+	if err != nil {
+		slog.Error("store: set custom token failed", "user_id", userID, "error", err)
+		return "", err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return "", fmt.Errorf("账号不存在")
+	}
+	slog.Info("store: custom api_token updated", "user_id", userID)
+	return token, nil
+}
+
 func (s *Store) GetDefaultAccount() (*Account, error) {
 	var a Account
 	var encPtKey string
@@ -1466,19 +1517,6 @@ func (s *Store) ReassignLogs(oldKeys []string, newKey string) (int64, error) {
 	return result.RowsAffected()
 }
 
-// EnsureDataDir ensures the data directory exists with correct permissions.
-func EnsureDataDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Join(home, DefaultDBDir)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", err
-	}
-	return dir, nil
-}
-
 // ExportAccountItem is the format for account export/import.
 type ExportAccountItem struct {
 	UserID       string `json:"user_id"`
@@ -1549,14 +1587,4 @@ func (s *Store) ImportAccounts(items []ExportAccountItem) (added int, updated in
 		}
 	}
 	return added, updated, nil
-}
-
-// Copy from os.ReadFile pattern -- used to check if DB exists.
-func DBExists() bool {
-	path, err := DefaultDBPath()
-	if err != nil {
-		return false
-	}
-	_, err = os.Stat(path)
-	return err == nil
 }

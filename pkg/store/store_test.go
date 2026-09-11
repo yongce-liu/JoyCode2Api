@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -270,6 +271,68 @@ func TestUpdateAccountModel(t *testing.T) {
 	a, _ := s.GetAccount("key1")
 	if a.DefaultModel != "GLM-5.1" {
 		t.Errorf("DefaultModel = %q, want %q", a.DefaultModel, "GLM-5.1")
+	}
+}
+
+// --- Custom token ---
+
+func TestSetAPITokenStoresAndResolvesAccount(t *testing.T) {
+	s := openTestStore(t)
+	s.AddAccount("key1", "pt1", "user1", true, "")
+
+	if _, err := s.SetAPIToken("key1", "  my-custom-token  "); err != nil {
+		t.Fatalf("SetAPIToken: %v", err)
+	}
+
+	a, err := s.GetAccountByToken("my-custom-token")
+	if err != nil {
+		t.Fatalf("GetAccountByToken: %v", err)
+	}
+	if a == nil || a.UserID != "key1" {
+		t.Fatalf("account by custom token = %#v, want key1", a)
+	}
+}
+
+func TestSetAPITokenRejectsInvalidValues(t *testing.T) {
+	s := openTestStore(t)
+	s.AddAccount("key1", "pt1", "user1", true, "")
+
+	if _, err := s.SetAPIToken("key1", "   "); err == nil {
+		t.Error("expected empty token to be rejected")
+	}
+	if _, err := s.SetAPIToken("key1", "has space"); err == nil {
+		t.Error("expected token with space to be rejected")
+	}
+	if _, err := s.SetAPIToken("key1", strings.Repeat("x", MaxAPITokenLen+1)); err == nil {
+		t.Error("expected over-long token to be rejected")
+	}
+	if _, err := s.SetAPIToken("missing", "valid-token"); err == nil {
+		t.Error("expected unknown account to be rejected")
+	}
+}
+
+func TestSetAPITokenRejectsDuplicate(t *testing.T) {
+	s := openTestStore(t)
+	s.AddAccount("key1", "pt1", "user1", true, "")
+	s.AddAccount("key2", "pt2", "user2", false, "")
+
+	if _, err := s.SetAPIToken("key1", "shared-token"); err != nil {
+		t.Fatalf("SetAPIToken key1: %v", err)
+	}
+	if _, err := s.SetAPIToken("key2", "shared-token"); err == nil {
+		t.Error("expected duplicate token to be rejected")
+	}
+}
+
+func TestSetAPITokenSameAccountAllowed(t *testing.T) {
+	s := openTestStore(t)
+	s.AddAccount("key1", "pt1", "user1", true, "")
+
+	if _, err := s.SetAPIToken("key1", "keep-me"); err != nil {
+		t.Fatalf("first SetAPIToken: %v", err)
+	}
+	if _, err := s.SetAPIToken("key1", "keep-me"); err != nil {
+		t.Errorf("re-saving the same token should be allowed, got %v", err)
 	}
 }
 

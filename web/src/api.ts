@@ -201,6 +201,11 @@ export const api = {
     request<{ logs: RequestLog[]; total: number }>(`/api/accounts/${encodeURIComponent(userId)}/logs?limit=${limit}`),
   renewToken: (userId: string) =>
     request<{ ok: boolean; api_token: string }>(`/api/accounts/${encodeURIComponent(userId)}/renew-token`, { method: 'POST' }),
+  updateToken: (userId: string, apiToken: string) =>
+    request<{ ok: boolean; api_token: string }>(`/api/accounts/${encodeURIComponent(userId)}/token`, {
+      method: 'PUT',
+      body: JSON.stringify({ api_token: apiToken }),
+    }),
   autoLogin: () =>
     request<{ ok: boolean; user_id: string; nickname: string; real_name: string; is_default: boolean }>('/api/accounts-auto-login', { method: 'POST' }),
   qrLoginInit: () =>

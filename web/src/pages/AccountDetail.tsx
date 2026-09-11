@@ -1,14 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import {
   Alert, Card, Row, Col, Statistic, Typography, Skeleton, Tag, Select, Button,
-  message, Space, Table, Badge, Segmented, Popconfirm, Tooltip, Divider,
+  message, Space, Table, Badge, Segmented, Popconfirm, Tooltip, Divider, Modal, Input,
 } from 'antd';
 import {
   ArrowLeftOutlined, ApiOutlined, ThunderboltOutlined,
   CheckCircleOutlined, ReloadOutlined,
   ClockCircleOutlined, GlobalOutlined, FireOutlined, CopyOutlined,
   DeleteOutlined, QuestionCircleOutlined, InfoCircleOutlined,
-  CloseCircleOutlined, SwapOutlined,
+  CloseCircleOutlined, SwapOutlined, EditOutlined,
 } from '@ant-design/icons';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip,
@@ -133,6 +133,9 @@ const AccountDetail: React.FC = () => {
   const [savingModel, setSavingModel] = useState(false);
   const [logFilter, setLogFilter] = useState<string>('all');
   const [activeSessions, setActiveSessions] = useState(0);
+  const [tokenModalOpen, setTokenModalOpen] = useState(false);
+  const [customToken, setCustomToken] = useState('');
+  const [savingToken, setSavingToken] = useState(false);
 
   const decodedKey = userId ? decodeURIComponent(userId) : '';
 
@@ -194,6 +197,30 @@ const AccountDetail: React.FC = () => {
       message.error(e instanceof Error ? e.message : '更新失败');
     } finally {
       setSavingModel(false);
+    }
+  };
+
+  const openTokenModal = () => {
+    setCustomToken(account?.api_token || '');
+    setTokenModalOpen(true);
+  };
+
+  const handleSaveToken = async () => {
+    const nextToken = customToken.trim();
+    if (!nextToken) {
+      message.error('Token 不能为空');
+      return;
+    }
+    setSavingToken(true);
+    try {
+      await api.updateToken(decodedKey, nextToken);
+      message.success('自定义 Token 已保存');
+      setTokenModalOpen(false);
+      fetchData();
+    } catch (e: unknown) {
+      message.error(e instanceof Error ? e.message : '保存失败');
+    } finally {
+      setSavingToken(false);
     }
   };
 
@@ -375,6 +402,9 @@ const AccountDetail: React.FC = () => {
           }}>
             重置 Token
           </Button>
+          <Button size="small" icon={<EditOutlined />} onClick={openTokenModal}>
+            自定义 Token
+          </Button>
           <Button size="small" icon={<ReloadOutlined />} onClick={() => { fetchData(); fetchModels(); }}>
             刷新
           </Button>
@@ -395,6 +425,29 @@ const AccountDetail: React.FC = () => {
           </Popconfirm>
         </Space>
       </div>
+
+      <Modal
+        title="自定义 Token"
+        open={tokenModalOpen}
+        onOk={handleSaveToken}
+        onCancel={() => setTokenModalOpen(false)}
+        confirmLoading={savingToken}
+        okText="保存"
+        cancelText="取消"
+        destroyOnHidden
+      >
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+          Token 用于客户端鉴权（x-api-key 或 Authorization: Bearer），需在所有账号中唯一，且不能包含空格。
+        </Typography.Paragraph>
+        <Input
+          value={customToken}
+          onChange={(e) => setCustomToken(e.target.value)}
+          placeholder="请输入自定义 Token"
+          maxLength={128}
+          onPressEnter={handleSaveToken}
+          autoFocus
+        />
+      </Modal>
 
       {/* Quick start commands */}
       {isClaudeModel(account.default_model) && (

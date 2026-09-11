@@ -1,28 +1,23 @@
 package joycode
 
 import (
-	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"reflect"
-	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
-// ---------------------------------------------------------------------------
-// Helper: builds a Client that routes all requests through a redirect
-// transport to the given httptest.Server.
-// ---------------------------------------------------------------------------
-
+// testServerClient builds a Client whose requests land on an httptest server
+// while keeping the original path and query string.
 func testServerClient(handler http.Handler) (*Client, func()) {
 	srv := httptest.NewServer(handler)
 	c := NewClient("test-key", "test-user")
@@ -31,8 +26,6 @@ func testServerClient(handler http.Handler) (*Client, func()) {
 	return c, srv.Close
 }
 
-// redirectTransport rewrites every request URL to point at the test server
-// while preserving the original path and query string.
 type redirectTransport struct {
 	target string
 	base   http.RoundTripper
@@ -43,17 +36,13 @@ func (rt redirectTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	if req.URL.RawQuery != "" {
 		newURL += "?" + req.URL.RawQuery
 	}
-	newReq, err := http.NewRequest(req.Method, newURL, req.Body)
+	newReq, err := http.NewRequestWithContext(req.Context(), req.Method, newURL, req.Body)
 	if err != nil {
 		return nil, err
 	}
 	newReq.Header = req.Header
 	return rt.base.RoundTrip(newReq)
 }
-
-// ---------------------------------------------------------------------------
-// Unit tests for constructors, headers, body preparation, ID generation
-// ---------------------------------------------------------------------------
 
 func TestNewClient_SessionIDUnique(t *testing.T) {
 	a := NewClient("k", "u")
@@ -80,24 +69,13 @@ func TestHeaders_ContainsRequiredFields(t *testing.T) {
 	c := NewClient("my-key", "u1")
 	h := c.headers()
 
-	// Canonical headers (use Get, which canonicalizes the key).
-	canonical := []string{
-		"Content-Type",
-		"User-Agent",
-		"Accept",
-		"Accept-Encoding",
-		"Accept-Language",
-	}
-	for _, key := range canonical {
+	for _, key := range []string{"Content-Type", "User-Agent", "Accept", "Accept-Encoding", "Accept-Language"} {
 		if v := h.Get(key); v == "" {
 			t.Errorf("headers missing required field %q", key)
 		}
 	}
-	// Non-canonical headers stored via map literal; access directly.
-	nonCanonical := []string{"ptKey", "loginType", "source-type"}
-	for _, key := range nonCanonical {
-		vals := h[key]
-		if len(vals) == 0 || vals[0] == "" {
+	for _, key := range []string{"ptKey", "loginType", "source-type"} {
+		if h.Get(key) == "" {
 			t.Errorf("headers missing required field %q", key)
 		}
 	}
@@ -105,941 +83,398 @@ func TestHeaders_ContainsRequiredFields(t *testing.T) {
 
 func TestHeaders_PtKeySet(t *testing.T) {
 	c := NewClient("abc123token", "u1")
-	h := c.headers()
-	vals := h["ptKey"]
-	if len(vals) == 0 || vals[0] != "abc123token" {
-		t.Errorf("ptKey header = %v, want %q", vals, "abc123token")
+	if got := c.headers().Get("ptKey"); got != "abc123token" {
+		t.Errorf("ptKey header = %q, want %q", got, "abc123token")
 	}
 }
 
-func TestPrepareBody_DefaultFields(t *testing.T) {
-	c := NewClient("k", "user42")
-	body := c.prepareBody(map[string]interface{}{})
-
-	defaults := map[string]string{
-		"tenant":        "JOYCODE",
-		"userId":        "user42",
-		"client":        "JoyCode",
-		"clientVersion": ClientVersion,
-		"language":      "UNKNOWN",
-	}
-	for field, want := range defaults {
-		got, _ := body[field].(string)
-		if got != want {
-			t.Errorf("prepareBody()[%q] = %q, want %q", field, got, want)
-		}
-	}
-}
-
-func TestPrepareBody_NoLegacyTrackingFields(t *testing.T) {
-	// JoyCode 2.7 协议不再自动注入 chatId/requestId/sessionId（对齐真实客户端 customFetch）。
-	c := NewClient("k", "u")
-	body := c.prepareBody(map[string]interface{}{})
-	for _, key := range []string{"chatId", "requestId", "sessionId"} {
-		if _, ok := body[key]; ok {
-			t.Errorf("prepareBody should not auto-inject %q in 2.7 protocol", key)
-		}
-	}
-}
-
-func TestPrepareBody_ExtraChatIdPassedThrough(t *testing.T) {
-	c := NewClient("k", "u")
-	body := c.prepareBody(map[string]interface{}{"chatId": "keep-me"})
-	if got, _ := body["chatId"].(string); got != "keep-me" {
-		t.Errorf("chatId = %q, want %q", got, "keep-me")
-	}
-}
-
-func TestPrepareBody_ExtraFieldsMerged(t *testing.T) {
-	c := NewClient("k", "u")
-	body := c.prepareBody(map[string]interface{}{
-		"model":    "GLM-5",
-		"stream":   true,
-		"messages": []string{"hello"},
-	})
-	if body["model"] != "GLM-5" {
-		t.Errorf("extra field model not merged: %v", body["model"])
-	}
-	if body["stream"] != true {
-		t.Errorf("extra field stream not merged: %v", body["stream"])
-	}
-	msgs, ok := body["messages"].([]string)
-	if !ok || len(msgs) != 1 || msgs[0] != "hello" {
-		t.Errorf("extra field messages not merged correctly: %v", body["messages"])
-	}
-}
-
-func TestNewHexID_LengthAndFormat(t *testing.T) {
-	id := newHexID()
-	if len(id) != 32 {
-		t.Errorf("newHexID() length = %d, want 32", len(id))
-	}
-	matched, _ := regexp.MatchString("^[0-9a-f]{32}$", id)
-	if !matched {
-		t.Errorf("newHexID() = %q, want 32 lowercase hex chars", id)
-	}
-}
-
-func TestNewHexID_Uniqueness(t *testing.T) {
-	seen := make(map[string]bool)
-	for i := 0; i < 100; i++ {
-		id := newHexID()
-		if seen[id] {
-			t.Fatalf("duplicate hex ID generated: %q", id)
-		}
-		seen[id] = true
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Client.Post tests
-// ---------------------------------------------------------------------------
-
-func TestClient_Post_Success(t *testing.T) {
-	want := map[string]interface{}{
-		"code": float64(0),
-		"data": "ok",
-	}
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(want)
-	}))
-	defer cleanup()
-
-	got, err := c.Post("/api/test", map[string]interface{}{"q": "hi"})
-	if err != nil {
-		t.Fatalf("Post() error: %v", err)
-	}
-	if got["code"] != want["code"] {
-		t.Errorf("Post() code = %v, want %v", got["code"], want["code"])
-	}
-}
-
-func TestClient_Post_ServerError(t *testing.T) {
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-	}))
-	defer cleanup()
-
-	_, err := c.Post("/api/test", nil)
-	if err == nil {
-		t.Fatal("Post() should return error on 500")
-	}
-	if !strings.Contains(err.Error(), "500") {
-		t.Errorf("error should mention status 500, got: %v", err)
-	}
-}
-
-func TestClient_Post_InvalidJSON(t *testing.T) {
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte("<<<not json>>>"))
-	}))
-	defer cleanup()
-
-	_, err := c.Post("/api/test", nil)
-	if err == nil {
-		t.Fatal("Post() should return error on invalid JSON")
-	}
-	if !strings.Contains(err.Error(), "invalid JSON") {
-		t.Errorf("error should mention invalid JSON, got: %v", err)
-	}
-}
-
-func TestClient_Post_GzipResponse(t *testing.T) {
-	want := map[string]interface{}{
-		"code": float64(0),
-		"msg":  "gzipped",
-	}
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Encoding", "gzip")
-		var buf bytes.Buffer
-		gz := gzip.NewWriter(&buf)
-		json.NewEncoder(gz).Encode(want)
-		gz.Close()
-		w.Write(buf.Bytes())
-	}))
-	defer cleanup()
-
-	got, err := c.Post("/api/test", nil)
-	if err != nil {
-		t.Fatalf("Post() error: %v", err)
-	}
-	if got["msg"] != "gzipped" {
-		t.Errorf("gzip response msg = %v, want %q", got["msg"], "gzipped")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Client.PostStream tests
-// ---------------------------------------------------------------------------
-
-func TestClient_PostStream_Success(t *testing.T) {
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("data: hello\n\ndata: world\n\n"))
-	}))
-	defer cleanup()
-
-	resp, err := c.PostStream("/api/test", nil)
-	if err != nil {
-		t.Fatalf("PostStream() error: %v", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "hello") {
-		t.Errorf("PostStream() body = %q, want to contain 'hello'", string(body))
-	}
-}
-
-func TestClient_PostStream_ServerError(t *testing.T) {
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "bad gateway", http.StatusBadGateway)
-	}))
-	defer cleanup()
-
-	_, err := c.PostStream("/api/test", nil)
-	if err == nil {
-		t.Fatal("PostStream() should return error on 502")
-	}
-	if !strings.Contains(err.Error(), "502") {
-		t.Errorf("error should mention 502, got: %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Client.ListModels tests
-// ---------------------------------------------------------------------------
-
-func TestClient_ListModels_Success(t *testing.T) {
-	modelData := []map[string]interface{}{
-		{
-			"label": "GLM", "chatApiModel": "glm-5", "maxTotalTokens": 8192,
-			"respMaxTokens": 4096, "temperature": 0.7, "features": []string{"code"},
-			"supportStream": true, "verificationStatus": "verified",
-			"modelId": "glm-5-id", "createTime": float64(1700000000),
-		},
-		{
-			"label": "Doubao", "chatApiModel": "doubao-pro", "maxTotalTokens": 16384,
-			"respMaxTokens": 8192, "temperature": 0.5, "features": []string{"chat"},
-			"supportStream": false, "verificationStatus": "verified",
-			"modelId": "doubao-id", "createTime": float64(1700000001),
-		},
-	}
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"code": float64(0),
-			"data": modelData,
-		})
-	}))
-	defer cleanup()
-
-	models, err := c.ListModels()
-	if err != nil {
-		t.Fatalf("ListModels() error: %v", err)
-	}
-	if len(models) != 2 {
-		t.Fatalf("ListModels() returned %d models, want 2", len(models))
-	}
-	if models[0].Label != "GLM" {
-		t.Errorf("models[0].Label = %q, want %q", models[0].Label, "GLM")
-	}
-	if models[1].ModelID != "doubao-id" {
-		t.Errorf("models[1].ModelID = %q, want %q", models[1].ModelID, "doubao-id")
-	}
-}
-
-func TestClient_ListModels_MalformedModel(t *testing.T) {
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"code": float64(0),
-			"data": []interface{}{
-				"this-is-not-a-model-object",
-				map[string]interface{}{
-					"label":              "Valid",
-					"chatApiModel":       "valid-model",
-					"maxTotalTokens":     4096,
-					"respMaxTokens":      2048,
-					"temperature":        0.8,
-					"features":           []string{},
-					"supportStream":      true,
-					"verificationStatus": "ok",
-					"modelId":            "valid-id",
-					"createTime":         float64(100),
-				},
-			},
-		})
-	}))
-	defer cleanup()
-
-	models, err := c.ListModels()
-	if err != nil {
-		t.Fatalf("ListModels() error: %v", err)
-	}
-	if len(models) != 1 {
-		t.Fatalf("ListModels() returned %d models, want 1 (bad entry skipped)", len(models))
-	}
-	if models[0].Label != "Valid" {
-		t.Errorf("models[0].Label = %q, want %q", models[0].Label, "Valid")
-	}
-}
-
-func TestClient_ListModels_MissingDataArray(t *testing.T) {
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"code": float64(0),
-			// "data" key is missing entirely
-		})
-	}))
-	defer cleanup()
-
-	_, err := c.ListModels()
-	if err == nil {
-		t.Fatal("ListModels() should return error when data array missing")
-	}
-	if !strings.Contains(err.Error(), "missing data array") {
-		t.Errorf("error should mention missing data array, got: %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Client.Validate tests
-// ---------------------------------------------------------------------------
-
-func TestClient_Validate_Success(t *testing.T) {
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"code": float64(0),
-			"msg":  "success",
-			"data": map[string]interface{}{"userId": "u1"},
-		})
-	}))
-	defer cleanup()
-
-	if err := c.Validate(); err != nil {
-		t.Errorf("Validate() returned unexpected error: %v", err)
-	}
-}
-
-func TestClient_Validate_InvalidToken(t *testing.T) {
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"code": float64(401),
-			"msg":  "invalid token",
-		})
-	}))
-	defer cleanup()
-
-	err := c.Validate()
-	if err == nil {
-		t.Fatal("Validate() should return error for code != 0")
-	}
-	if !strings.Contains(err.Error(), "401") {
-		t.Errorf("error should mention code 401, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "invalid token") {
-		t.Errorf("error should contain msg, got: %v", err)
-	}
-}
-
-func TestClient_Validate_ApiError(t *testing.T) {
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
-	}))
-	defer cleanup()
-
-	err := c.Validate()
-	if err == nil {
-		t.Fatal("Validate() should return error on server failure")
-	}
-	if !strings.Contains(err.Error(), "credential validation failed") {
-		t.Errorf("error should mention validation failed, got: %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Client.WebSearch tests
-// ---------------------------------------------------------------------------
-
-func TestClient_WebSearch_Success(t *testing.T) {
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var reqBody map[string]interface{}
-		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
-			t.Errorf("failed to decode request body: %v", err)
-		}
-		if reqBody["model"] != "search_pro_jina" {
-			t.Errorf("WebSearch model = %v, want search_pro_jina", reqBody["model"])
-		}
-
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"code": float64(0),
-			"search_result": []interface{}{
-				map[string]interface{}{"title": "Result 1", "url": "https://example.com"},
-				map[string]interface{}{"title": "Result 2", "url": "https://example.org"},
-			},
-		})
-	}))
-	defer cleanup()
-
-	results, err := c.WebSearch("test query")
-	if err != nil {
-		t.Fatalf("WebSearch() error: %v", err)
-	}
-	if len(results) != 2 {
-		t.Errorf("WebSearch() returned %d results, want 2", len(results))
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Client.Rerank tests
-// ---------------------------------------------------------------------------
-
-func TestClient_Rerank_Success(t *testing.T) {
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var reqBody map[string]interface{}
-		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
-			t.Errorf("failed to decode request body: %v", err)
-		}
-		if reqBody["model"] != "Qwen3-Reranker-8B" {
-			t.Errorf("Rerank model = %v, want Qwen3-Reranker-8B", reqBody["model"])
-		}
-
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"code": float64(0),
-			"data": []interface{}{
-				map[string]interface{}{"index": float64(1), "relevance_score": 0.95},
-				map[string]interface{}{"index": float64(0), "relevance_score": 0.72},
-			},
-		})
-	}))
-	defer cleanup()
-
-	result, err := c.Rerank("query", []string{"doc1", "doc2"}, 5)
-	if err != nil {
-		t.Fatalf("Rerank() error: %v", err)
-	}
-	data, ok := result["data"].([]interface{})
-	if !ok || len(data) != 2 {
-		t.Fatalf("Rerank() data = %v, want 2 items", result["data"])
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Table-driven: doPost sends correct method, path, headers, and body
-// ---------------------------------------------------------------------------
-
-func TestClient_DoPost_SendsCorrectRequest(t *testing.T) {
-	tests := []struct {
-		name     string
-		endpoint string
-		body     map[string]interface{}
-	}{
-		{"simple", "/api/test", map[string]interface{}{"key": "val"}},
-		{"empty body", "/api/empty", map[string]interface{}{}},
-		{"nested", "/api/nested", map[string]interface{}{"outer": map[string]interface{}{"inner": float64(42)}}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost {
-					t.Errorf("method = %q, want POST", r.Method)
-				}
-				if r.URL.Path != tt.endpoint {
-					t.Errorf("path = %q, want %q", r.URL.Path, tt.endpoint)
-				}
-				ct := r.Header.Get("Content-Type")
-				if ct != "application/json; charset=UTF-8" {
-					t.Errorf("Content-Type = %q, want application/json; charset=UTF-8", ct)
-				}
-				if pk := r.Header.Get("ptKey"); pk != "test-key" {
-					t.Errorf("ptKey = %q, want %q", pk, "test-key")
-				}
-				var got map[string]interface{}
-				if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-					t.Fatalf("body is not valid JSON: %v", err)
-				}
-				for k, v := range tt.body {
-					if !reflect.DeepEqual(got[k], v) {
-						t.Errorf("body[%q] = %v, want %v", k, got[k], v)
-					}
-				}
-				json.NewEncoder(w).Encode(map[string]interface{}{"code": float64(0)})
-			}))
-			defer cleanup()
-
-			_, _ = c.Post(tt.endpoint, tt.body)
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Table-driven: prepareBody with various inputs
-// ---------------------------------------------------------------------------
-
-func TestPrepareBody_Table(t *testing.T) {
-	c := NewClient("k", "user1")
-
-	tests := []struct {
-		name  string
-		extra map[string]interface{}
-		check func(t *testing.T, body map[string]interface{})
-	}{
-		{
-			name:  "defaults only",
-			extra: map[string]interface{}{},
-			check: func(t *testing.T, body map[string]interface{}) {
-				for _, key := range []string{"tenant", "userId", "client", "clientVersion", "language"} {
-					if body[key] == nil {
-						t.Errorf("missing default field %q", key)
-					}
-				}
-			},
-		},
-		{
-			name:  "custom chatId and requestId",
-			extra: map[string]interface{}{"chatId": "c1", "requestId": "r1"},
-			check: func(t *testing.T, body map[string]interface{}) {
-				if body["chatId"] != "c1" {
-					t.Errorf("chatId = %v, want c1", body["chatId"])
-				}
-				if body["requestId"] != "r1" {
-					t.Errorf("requestId = %v, want r1", body["requestId"])
-				}
-			},
-		},
-		{
-			name:  "extra fields override defaults",
-			extra: map[string]interface{}{"tenant": "CUSTOM"},
-			check: func(t *testing.T, body map[string]interface{}) {
-				if body["tenant"] != "CUSTOM" {
-					t.Errorf("tenant = %v, want CUSTOM", body["tenant"])
-				}
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			body := c.prepareBody(tt.extra)
-			tt.check(t, body)
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Validate edge cases
-// ---------------------------------------------------------------------------
-
-func TestClient_Validate_MissingCodeField(t *testing.T) {
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"msg": "no code",
-		})
-	}))
-	defer cleanup()
-
-	err := c.Validate()
-	if err == nil {
-		t.Fatal("Validate() should return error when code field is missing")
-	}
-}
-
-func TestClient_Validate_CodeNotFloat(t *testing.T) {
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"code":"not-a-number","msg":"weird"}`))
-	}))
-	defer cleanup()
-
-	err := c.Validate()
-	if err == nil {
-		t.Fatal("Validate() should return error when code is not a number")
-	}
-}
-
-func TestClient_Validate_NonZeroCodeEmptyMsg(t *testing.T) {
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"code": float64(500),
-		})
-	}))
-	defer cleanup()
-
-	err := c.Validate()
-	if err == nil {
-		t.Fatal("Validate() should return error for non-zero code")
-	}
-	if !strings.Contains(err.Error(), "unknown error") {
-		t.Errorf("error should mention 'unknown error', got: %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Post with nil body (prepareBody handles nil map gracefully)
-// ---------------------------------------------------------------------------
-
-func TestClient_Post_NilBody(t *testing.T) {
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{"code": float64(0)})
-	}))
-	defer cleanup()
-
-	body := c.prepareBody(nil)
-	got, err := c.Post("/test", body)
-	if err != nil {
-		t.Fatalf("Post() error: %v", err)
-	}
-	if got["code"] != float64(0) {
-		t.Errorf("Post() code = %v, want 0", got["code"])
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Concurrent newHexID should not produce duplicates
-// ---------------------------------------------------------------------------
-
-func TestNewHexID_Concurrent(t *testing.T) {
-	const n = 50
-	ids := make(chan string, n)
-	for i := 0; i < n; i++ {
-		go func() {
-			ids <- newHexID()
-		}()
-	}
-	seen := make(map[string]bool)
-	for i := 0; i < n; i++ {
-		id := <-ids
-		if seen[id] {
-			t.Errorf("duplicate ID generated concurrently: %q", id)
-		}
-		seen[id] = true
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Verify correct Content-Type and Accept-Encoding headers are sent
-// ---------------------------------------------------------------------------
-
-func TestClient_Post_SendsCorrectHeaders(t *testing.T) {
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ct := r.Header.Get("Content-Type")
-		if ct != "application/json; charset=UTF-8" {
-			t.Errorf("Content-Type = %q, want %q", ct, "application/json; charset=UTF-8")
-		}
-		ae := r.Header.Get("Accept-Encoding")
-		if ae != "gzip, deflate" {
-			t.Errorf("Accept-Encoding = %q, want %q", ae, "gzip, deflate")
-		}
-		ua := r.Header.Get("User-Agent")
-		if ua != UserAgent {
-			t.Errorf("User-Agent = %q, want %q", ua, UserAgent)
-		}
-		json.NewEncoder(w).Encode(map[string]interface{}{"code": float64(0)})
-	}))
-	defer cleanup()
-
-	_, _ = c.Post("/test", map[string]interface{}{})
-}
-
-// ---------------------------------------------------------------------------
-// ListModels with empty data array returns empty slice (not error)
-// ---------------------------------------------------------------------------
-
-func TestClient_ListModels_EmptyDataArray(t *testing.T) {
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"code": float64(0),
-			"data": []interface{}{},
-		})
-	}))
-	defer cleanup()
-
-	models, err := c.ListModels()
-	if err != nil {
-		t.Fatalf("ListModels() error: %v", err)
-	}
-	if len(models) != 0 {
-		t.Errorf("ListModels() returned %d models, want 0", len(models))
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Table-driven: Post error propagation on various HTTP status codes
-// ---------------------------------------------------------------------------
-
-func TestClient_Post_VariousStatusCodes(t *testing.T) {
-	tests := []struct {
-		name       string
-		statusCode int
-		wantErr    bool
-	}{
-		{"200 OK", 200, false},
-		{"400 Bad Request", 400, true},
-		{"401 Unauthorized", 401, true},
-		{"403 Forbidden", 403, true},
-		{"404 Not Found", 404, true},
-		{"500 Internal Server Error", 500, true},
-		{"502 Bad Gateway", 502, true},
-		{"503 Service Unavailable", 503, true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tt.statusCode)
-				fmt.Fprintf(w, `{"code": %d}`, tt.statusCode)
-			}))
-			defer cleanup()
-
-			_, err := c.Post("/test", nil)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Post() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// PostStream returns a readable body for streaming use cases
-// ---------------------------------------------------------------------------
-
-func TestClient_PostStream_ResponseBodyReadable(t *testing.T) {
-	chunks := []string{"chunk1", "chunk2", "chunk3"}
-	c, cleanup := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		for _, ch := range chunks {
-			w.Write([]byte(ch))
-		}
-	}))
-	defer cleanup()
-
-	resp, err := c.PostStream("/test", nil)
-	if err != nil {
-		t.Fatalf("PostStream() error: %v", err)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("reading stream body: %v", err)
-	}
-	got := string(data)
-	want := "chunk1chunk2chunk3"
-	if got != want {
-		t.Errorf("stream body = %q, want %q", got, want)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// decodeBody with plain and gzipped responses
-// ---------------------------------------------------------------------------
-
-func TestDecodeBody_PlainJSON(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"ok":true}`))
-	}))
-	defer srv.Close()
-
-	resp, err := srv.Client().Get(srv.URL)
-	if err != nil {
-		t.Fatalf("GET error: %v", err)
-	}
-	data, err := decodeBody(resp)
-	if err != nil {
-		t.Fatalf("decodeBody() error: %v", err)
-	}
-	if string(data) != `{"ok":true}` {
-		t.Errorf("decodeBody() = %q, want %q", string(data), `{"ok":true}`)
-	}
-}
-
-func TestDecodeBody_Gzipped(t *testing.T) {
-	want := `{"gzipped":true}`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Encoding", "gzip")
-		var buf bytes.Buffer
-		gz := gzip.NewWriter(&buf)
-		gz.Write([]byte(want))
-		gz.Close()
-		w.Write(buf.Bytes())
-	}))
-	defer srv.Close()
-
-	resp, err := srv.Client().Get(srv.URL)
-	if err != nil {
-		t.Fatalf("GET error: %v", err)
-	}
-	data, err := decodeBody(resp)
-	if err != nil {
-		t.Fatalf("decodeBody() error: %v", err)
-	}
-	if string(data) != want {
-		t.Errorf("decodeBody() = %q, want %q", string(data), want)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// color gateway signing / routing (JoyCode 2.7)
-// ---------------------------------------------------------------------------
-
-func TestRequestURL_GatewaySigned(t *testing.T) {
-	c := NewClient("k", "u")
-	c.ColorBaseURL = "https://api-ai.jd.com"
-	raw := c.requestURL("/api/saas/openai/v1/chat/completions")
-
-	u, err := url.Parse(raw)
-	if err != nil {
-		t.Fatalf("parse url: %v", err)
-	}
-	if u.Host != "api-ai.jd.com" || u.Path != "/api" {
-		t.Errorf("gateway url host/path = %q/%q, want api-ai.jd.com//api", u.Host, u.Path)
-	}
-	q := u.Query()
-	if q.Get("appid") != "joycode_ide" {
-		t.Errorf("appid = %q, want joycode_ide", q.Get("appid"))
-	}
-	if q.Get("functionId") != "chat_completions" {
-		t.Errorf("functionId = %q, want chat_completions", q.Get("functionId"))
-	}
-	if q.Get("t") == "" {
-		t.Error("missing timestamp t")
-	}
-	// 重算签名校验：HMAC_SHA256(sorted(values).join("&"), key)
-	signStr := "joycode_ide&chat_completions&" + q.Get("t")
-	mac := hmac.New(sha256.New, []byte(colorHMACKey))
-	mac.Write([]byte(signStr))
-	want := hex.EncodeToString(mac.Sum(nil))
-	if q.Get("sign") != want {
-		t.Errorf("sign = %q, want %q", q.Get("sign"), want)
-	}
-}
-
-func TestNativeRequestURL_GPTUsesChatGateway(t *testing.T) {
-	c := NewClient("account-key", "u")
-	c.SetNativeContext(NativeContext{
-		PtKey:        "plugin-short-key",
-		LoginType:    "ERP",
-		ColorBaseURL: "https://plugin-gateway.example.com",
-	})
-	raw := c.nativeRequestURL("/api/saas/openai/v1/chat/completions")
-	u, err := url.Parse(raw)
-	if err != nil {
-		t.Fatalf("parse url: %v", err)
-	}
-	if u.Host != "plugin-gateway.example.com" || u.Path != "/api" {
-		t.Fatalf("gateway host/path = %q/%q", u.Host, u.Path)
-	}
-	if got := u.Query().Get("functionId"); got != "chat_completions" {
-		t.Fatalf("functionId = %q, want chat_completions", got)
-	}
-}
-
-func TestNativeRequestURL_GPTUsesResponsesGateway(t *testing.T) {
-	c := NewClient("account-key", "u")
-	c.SetNativeContext(NativeContext{
-		PtKey:        "plugin-short-key",
-		LoginType:    "ERP",
-		ColorBaseURL: "https://plugin-gateway.example.com",
-	})
-	raw := c.nativeRequestURL("/api/saas/openai/v1/responses")
-	u, err := url.Parse(raw)
-	if err != nil {
-		t.Fatalf("parse url: %v", err)
-	}
-	if u.Host != "plugin-gateway.example.com" || u.Path != "/api" {
-		t.Fatalf("gateway host/path = %q/%q", u.Host, u.Path)
-	}
-	if got := u.Query().Get("functionId"); got != "responses_completions" {
-		t.Fatalf("functionId = %q, want responses_completions", got)
-	}
-}
-
-func TestRequestURL_DirectV2WhenNoColorBase(t *testing.T) {
-	c := NewClient("k", "u")
-	c.ColorBaseURL = ""
-	c.MasterBaseURL = "https://joycode-api.jd.com"
-	got := c.requestURL("/api/saas/models/v1/modelList")
-	want := "https://joycode-api.jd.com/api/saas/models/v2/modelList"
-	if got != want {
-		t.Errorf("direct url = %q, want %q", got, want)
-	}
-}
-
-func TestRequestURL_UnmappedEndpointStaysDirect(t *testing.T) {
-	c := NewClient("k", "u")
-	got := c.requestURL("/api/saas/openai/v1/rerank") // 不在 color 端点表
-	want := BaseURL + "/api/saas/openai/v1/rerank"
-	if got != want {
-		t.Errorf("unmapped url = %q, want %q", got, want)
-	}
-}
-
-func TestAnthropicHeaders_DefaultsToPinJdCloud(t *testing.T) {
+func TestHeaders_BrowserKeyDefaultsToPinJdCloud(t *testing.T) {
 	c := NewClient("acct-key", "u1")
-	h := c.anthropicHeaders()
-	if got := h["ptKey"][0]; got != "acct-key" {
+	h := c.headers()
+	if got := h.Get("ptKey"); got != "acct-key" {
 		t.Errorf("ptKey = %q, want the account key", got)
 	}
-	if got := h["loginType"][0]; got != "PIN_JD_CLOUD" {
+	if got := h.Get("loginType"); got != "PIN_JD_CLOUD" {
 		t.Errorf("loginType = %q, want PIN_JD_CLOUD fallback", got)
 	}
 }
 
-func TestNativeHeaders_ShortPluginKeyDefaultsToERP(t *testing.T) {
-	key := strings.Repeat("k", 52)
-	c := NewClient(key, "u1")
-	if got := c.nativeHeaders()["loginType"][0]; got != "ERP" {
-		t.Errorf("native loginType = %q, want ERP", got)
-	}
-	if got := c.anthropicHeaders()["loginType"][0]; got != "ERP" {
-		t.Errorf("anthropic loginType = %q, want ERP", got)
-	}
-	body := c.prepareNativeBody(map[string]interface{}{})
-	if body["tenant"] != "JD" {
-		t.Errorf("native tenant = %v, want JD", body["tenant"])
+func TestHeaders_PluginKeyDefaultsToERP(t *testing.T) {
+	// Both the 52-character legacy key and the 74-character key the editor
+	// plugin issues today authenticate as ERP.
+	for _, length := range []int{52, 74} {
+		c := NewClient(strings.Repeat("k", length), "u1")
+		if got := c.headers().Get("loginType"); got != "ERP" {
+			t.Errorf("ptKey length %d: loginType = %q, want ERP", length, got)
+		}
 	}
 }
 
-// The whole point of AnthropicContext: plugin/IDE creds (loginType "ERP",
-// tenant gateway URLs) must drive the native Anthropic request, not the
-// hardcoded "PIN_JD_CLOUD" + public defaults.
-func TestAnthropicContext_DrivesHeadersAndRouting(t *testing.T) {
+func TestHeaders_PinnedLoginWins(t *testing.T) {
+	c := NewClient("acct-key", "u1")
+	c.SetNativeContext(NativeContext{PtKey: "plugin-key", LoginType: "ERP"})
+	h := c.headers()
+	if got := h.Get("ptKey"); got != "plugin-key" {
+		t.Errorf("ptKey = %q, want the pinned plugin key", got)
+	}
+	if got := h.Get("loginType"); got != "ERP" {
+		t.Errorf("loginType = %q, want ERP", got)
+	}
+}
+
+func TestEndpointURL_ResolvesAgainstUpstreamOrigin(t *testing.T) {
+	prev := BaseURL
+	BaseURL = "http://joycode-api-saas.jd.com/"
+	defer func() { BaseURL = prev }()
+
+	c := NewClient("k", "u")
+	for endpoint, want := range map[string]string{
+		EndpointChatCompletions: "http://joycode-api-saas.jd.com/api/saas/openai/v2/chat/completions",
+		EndpointMessages:        "http://joycode-api-saas.jd.com/api/saas/anthropic/v1/messages",
+		EndpointModelList:       "http://joycode-api-saas.jd.com/api/saas/models/v2/modelList",
+	} {
+		got, err := c.endpointURL(endpoint)
+		if err != nil {
+			t.Fatalf("endpointURL(%q): %v", endpoint, err)
+		}
+		if got != want {
+			t.Errorf("endpointURL(%q) = %q, want %q", endpoint, got, want)
+		}
+	}
+}
+
+// A deployment outside the JD intranet sets JOYCODE_GATEWAY_URL and every call
+// is signed and routed by functionId instead of using the saas paths.
+func TestEndpointURL_GatewaySignsAndRoutesByFunctionID(t *testing.T) {
+	prevURL, prevGateway := BaseURL, GatewayURL
+	BaseURL = "http://joycode-api-saas.jd.com"
+	GatewayURL = "https://api-ai.jd.com/"
+	defer func() { BaseURL, GatewayURL = prevURL, prevGateway }()
+
+	c := NewClient("k", "u")
+	for endpoint, wantFunction := range map[string]string{
+		EndpointChatCompletions: "chat_completions",
+		EndpointResponses:       "responses_completions",
+		EndpointMessages:        "anthropic_completions",
+		EndpointModelList:       "joycode_modelList",
+		EndpointUserInfo:        "joycode_userInfo",
+		EndpointWebSearch:       "web_search",
+	} {
+		got, err := c.endpointURL(endpoint)
+		if err != nil {
+			t.Fatalf("endpointURL(%q): %v", endpoint, err)
+		}
+		u, err := url.Parse(got)
+		if err != nil {
+			t.Fatalf("parse %q: %v", got, err)
+		}
+		if u.Host != "api-ai.jd.com" || u.Path != "/api" {
+			t.Errorf("%s: host/path = %q/%q, want api-ai.jd.com//api", endpoint, u.Host, u.Path)
+		}
+		q := u.Query()
+		if q.Get("appid") != colorGatewayAppID {
+			t.Errorf("%s: appid = %q, want %q", endpoint, q.Get("appid"), colorGatewayAppID)
+		}
+		if q.Get("functionId") != wantFunction {
+			t.Errorf("%s: functionId = %q, want %q", endpoint, q.Get("functionId"), wantFunction)
+		}
+		if q.Get("t") == "" {
+			t.Errorf("%s: missing timestamp", endpoint)
+		}
+		signStr := colorGatewayAppID + "&" + wantFunction + "&" + q.Get("t")
+		mac := hmac.New(sha256.New, []byte(colorHMACKey))
+		mac.Write([]byte(signStr))
+		if want := hex.EncodeToString(mac.Sum(nil)); q.Get("sign") != want {
+			t.Errorf("%s: sign = %q, want %q", endpoint, q.Get("sign"), want)
+		}
+	}
+}
+
+// rerank has no gateway functionId: the gateway must say so instead of being
+// handed a request it cannot route.
+func TestEndpointURL_GatewayRejectsUnmappedEndpoint(t *testing.T) {
+	prevGateway := GatewayURL
+	GatewayURL = "https://api-ai.jd.com"
+	defer func() { GatewayURL = prevGateway }()
+
+	if _, err := NewClient("k", "u").endpointURL(EndpointRerank); err == nil {
+		t.Error("rerank has no color gateway functionId, want an error")
+	}
+}
+
+// Pinned plugin credentials change the authentication a request carries, but
+// never where it is sent: there is one JoyCode origin.
+func TestNativeContext_DrivesHeadersOnly(t *testing.T) {
 	c := NewClient("acct-key", "jd_abc")
-	c.SetAnthropicContext(AnthropicContext{
-		PtKey:         "plugin-key",
-		LoginType:     "ERP",
-		ColorBaseURL:  "https://gw.example.com/base",
-		MasterBaseURL: "http://master.example.com",
-		Tenant:        "JD",
-		OrgFullName:   "集团-实验室",
+	c.SetNativeContext(NativeContext{
+		PtKey:       "plugin-key",
+		LoginType:   "ERP",
+		Tenant:      "JD",
+		OrgFullName: "集团-实验室",
 	})
 
-	h := c.anthropicHeaders()
-	if got := h["ptKey"][0]; got != "plugin-key" {
-		t.Errorf("anthropic ptKey = %q, want plugin-key", got)
+	body, err := c.mergeMetadata([]byte(`{}`), ProtocolAnthropic)
+	if err != nil {
+		t.Fatalf("mergeMetadata: %v", err)
 	}
-	if got := h["loginType"][0]; got != "ERP" {
-		t.Errorf("anthropic loginType = %q, want ERP", got)
+	if !strings.Contains(string(body), `"tenant":"JD"`) || !strings.Contains(string(body), `"orgFullName":"集团-实验室"`) {
+		t.Errorf("pinned tenant metadata missing: %s", body)
 	}
+	if got, err := c.endpointURL(EndpointMessages); err != nil || got != BaseURL+EndpointMessages {
+		t.Errorf("url = %q (err %v), want the default upstream origin", got, err)
+	}
+}
 
-	gotURL := c.nativeRequestURL("/api/saas/anthropic/v1/messages")
-	if !strings.Contains(gotURL, "gw.example.com/base/api?") {
-		t.Errorf("anthropic url not gateway-routed: %q", gotURL)
-	}
-	if !strings.Contains(gotURL, "functionId=anthropic_completions") || !strings.Contains(gotURL, "sign=") {
-		t.Errorf("anthropic url missing functionId/sign: %q", gotURL)
-	}
+func TestMergeMetadata_DefaultsAndClientPrecedence(t *testing.T) {
+	c := NewClient("pt", "user-42")
+	c.Tenant = "JD"
+	c.OrgFullName = "org"
 
-	body := c.prepareAnthropicBody(map[string]interface{}{"model": "Claude-Opus-4.7-hq"})
-	if body["tenant"] != "JD" || body["orgFullName"] != "集团-实验室" {
-		t.Errorf("body context = %v / %v", body["tenant"], body["orgFullName"])
+	merged, err := c.mergeMetadata([]byte(`{"model":"m","tenant":"CUSTOM"}`), ProtocolOpenAI)
+	if err != nil {
+		t.Fatalf("mergeMetadata: %v", err)
 	}
+	var fields map[string]interface{}
+	if err := json.Unmarshal(merged, &fields); err != nil {
+		t.Fatalf("merged body not JSON: %v", err)
+	}
+	if fields["userId"] != "user-42" || fields["client"] != "JoyCode" || fields["clientVersion"] != ClientVersion {
+		t.Errorf("metadata missing: %v", fields)
+	}
+	if fields["tenant"] != "CUSTOM" {
+		t.Errorf("a client-supplied field must win, got tenant=%v", fields["tenant"])
+	}
+	if fields["model"] != "m" {
+		t.Errorf("payload fields must survive, got model=%v", fields["model"])
+	}
+}
 
-	// The openai path must be untouched by the pinned Anthropic context.
-	if got := c.headers()["loginType"][0]; got != "N_PIN_PC" {
-		t.Errorf("openai headers changed: loginType = %q", got)
+func TestMergeMetadata_TenantDefaultsPerProtocol(t *testing.T) {
+	openai := NewClient("pt", "u")
+	body, err := openai.mergeMetadata([]byte(`{}`), ProtocolOpenAI)
+	if err != nil {
+		t.Fatalf("mergeMetadata: %v", err)
 	}
-	if got := c.headers()["ptKey"][0]; got != "acct-key" {
-		t.Errorf("openai headers changed: ptKey = %q", got)
+	if !strings.Contains(string(body), `"tenant":"JOYCODE"`) {
+		t.Errorf("openai tenant default missing: %s", body)
+	}
+	anthropic := NewClient("pt", "u")
+	body, err = anthropic.mergeMetadata([]byte(`{}`), ProtocolAnthropic)
+	if err != nil {
+		t.Fatalf("mergeMetadata: %v", err)
+	}
+	if !strings.Contains(string(body), `"tenant":"JD"`) {
+		t.Errorf("anthropic tenant default missing: %s", body)
+	}
+}
+
+func TestMergeMetadata_RejectsNonObjectBody(t *testing.T) {
+	c := NewClient("pt", "u")
+	if _, err := c.mergeMetadata([]byte(`[1,2]`), ProtocolOpenAI); err == nil {
+		t.Error("array body should be rejected")
+	}
+}
+
+func TestForward_PostsPayloadWithProtocolHeaders(t *testing.T) {
+	var gotPath, gotPtKey, gotEncoding string
+	client, closeFn := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotPtKey = r.Header.Get("ptKey")
+		gotEncoding = r.Header.Get("Accept-Encoding")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer closeFn()
+
+	resp, err := client.Forward("/api/saas/anthropic/v1/messages", ProtocolAnthropic, []byte(`{"model":"m"}`))
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	defer resp.Body.Close()
+	if gotPath != "/api/saas/anthropic/v1/messages" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if gotPtKey != "test-key" {
+		t.Errorf("ptKey = %q, want test-key", gotPtKey)
+	}
+	if gotEncoding != "identity" {
+		t.Errorf("Accept-Encoding = %q, want identity", gotEncoding)
+	}
+}
+
+func TestForward_ReturnsNon200ResponseToCaller(t *testing.T) {
+	client, closeFn := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"code":"6002","msg":"model not registered"}`)
+	}))
+	defer closeFn()
+
+	resp, err := client.Forward("/api/saas/openai/v1/chat/completions", ProtocolOpenAI, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Forward must not turn an upstream status into a transport error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+	data, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(data), "6002") {
+		t.Errorf("upstream body lost: %s", data)
+	}
+}
+
+// A relayed request must not outlive its client: when the caller gives up, the
+// upstream call is cancelled and its connection is released instead of being
+// held until the upstream answers.
+func TestForwardContext_CancelsUpstreamWhenCallerAborts(t *testing.T) {
+	handlerSawCancel := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Consume the body first: an upstream that never reads it would only
+		// notice the closed connection when it next touches the stream.
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case <-r.Context().Done():
+			close(handlerSawCancel)
+		case <-time.After(10 * time.Second):
+		}
+	}))
+	defer srv.Close()
+
+	prev := BaseURL
+	BaseURL = srv.URL
+	defer func() { BaseURL = prev }()
+
+	client := NewClient("test-key", "test-user")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		resp, err := client.ForwardContext(ctx, "/api/saas/openai/v1/chat/completions", ProtocolOpenAI, []byte(`{"model":"m"}`))
+		if resp != nil {
+			resp.Body.Close()
+		}
+		errCh <- err
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Error("ForwardContext returned nil after the caller context was cancelled")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ForwardContext did not return after the caller context was cancelled")
+	}
+	select {
+	case <-handlerSawCancel:
+	case <-time.After(5 * time.Second):
+		t.Fatal("upstream request was not cancelled with the caller context")
+	}
+}
+
+func TestForward_UnwrapsGzip(t *testing.T) {
+	client, closeFn := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		_, _ = gz.Write([]byte(`{"ok":true}`))
+		_ = gz.Close()
+	}))
+	defer closeFn()
+
+	resp, err := client.Forward("/api/saas/openai/v1/chat/completions", ProtocolOpenAI, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if string(data) != `{"ok":true}` {
+		t.Errorf("body = %s, want decompressed JSON", data)
+	}
+	if resp.Header.Get("Content-Encoding") != "" {
+		t.Errorf("Content-Encoding should be cleared, got %q", resp.Header.Get("Content-Encoding"))
+	}
+}
+
+func TestListModels(t *testing.T) {
+	client, closeFn := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"code":0,"data":[{"chatApiModel":"GLM-5.1"}]}`)
+	}))
+	defer closeFn()
+
+	models, err := client.ListModels()
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(models) != 1 || models[0].ChatAPIModel != "GLM-5.1" {
+		t.Errorf("models = %+v", models)
+	}
+}
+
+func TestListModels_MissingDataArray(t *testing.T) {
+	client, closeFn := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"code":0}`)
+	}))
+	defer closeFn()
+
+	if _, err := client.ListModels(); err == nil {
+		t.Error("missing data array should be an error")
+	}
+}
+
+func TestValidate(t *testing.T) {
+	client, closeFn := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"code":0,"data":{"ptKey":"fresh"}}`)
+	}))
+	defer closeFn()
+
+	if err := client.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	key, err := client.UserInfoWithRefresh()
+	if err != nil {
+		t.Fatalf("UserInfoWithRefresh: %v", err)
+	}
+	if key != "fresh" {
+		t.Errorf("refreshed key = %q, want fresh", key)
+	}
+}
+
+func TestValidate_InvalidToken(t *testing.T) {
+	client, closeFn := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"code":1050,"msg":"quota exhausted"}`)
+	}))
+	defer closeFn()
+
+	err := client.Validate()
+	if err == nil || !strings.Contains(err.Error(), "quota exhausted") {
+		t.Errorf("Validate error = %v, want the upstream reason", err)
+	}
+}
+
+func TestWebSearchAndRerank(t *testing.T) {
+	client, closeFn := testServerClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/saas/openai/v2/web-search":
+			_, _ = io.WriteString(w, `{"code":0,"search_result":[{"title":"t"}]}`)
+		default:
+			_, _ = io.WriteString(w, `{"code":0,"results":[{"score":1}]}`)
+		}
+	}))
+	defer closeFn()
+
+	results, err := client.WebSearch("query")
+	if err != nil {
+		t.Fatalf("WebSearch: %v", err)
+	}
+	if len(results) != 1 {
+		t.Errorf("search results = %v", results)
+	}
+	reranked, err := client.Rerank("query", []string{"doc"}, 1)
+	if err != nil {
+		t.Fatalf("Rerank: %v", err)
+	}
+	if _, ok := reranked["results"]; !ok {
+		t.Errorf("rerank response = %v", reranked)
 	}
 }

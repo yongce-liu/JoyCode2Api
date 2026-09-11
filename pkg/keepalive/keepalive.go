@@ -39,16 +39,6 @@ func NewKeeper(s *store.Store, refreshTTL time.Duration) *Keeper {
 	}
 }
 
-// GetStatus returns the credential status for an account.
-func (k *Keeper) GetStatus(apiKey string) *CredentialStatus {
-	k.mu.RLock()
-	defer k.mu.RUnlock()
-	if s, ok := k.status[apiKey]; ok {
-		return s
-	}
-	return nil
-}
-
 // GetAllStatuses returns a copy of all credential statuses.
 func (k *Keeper) GetAllStatuses() map[string]*CredentialStatus {
 	k.mu.RLock()
@@ -165,7 +155,7 @@ func (k *Keeper) checkOne(apiKey, ptKey, userID string) string {
 
 	if err != nil {
 		slog.Warn("keepalive: account check failed",
-			"user_id", apiKey,
+			"api_key", apiKey,
 			"user_id", userID,
 			"error", err,
 			"duration", checkDuration,
@@ -188,7 +178,7 @@ func (k *Keeper) checkOne(apiKey, ptKey, userID string) string {
 
 	if refreshedPtKey != "" && refreshedPtKey != ptKey {
 		slog.Info("keepalive: pt_key refresh available",
-			"user_id", apiKey,
+			"api_key", apiKey,
 			"user_id", userID,
 			"old_prefix", maskKey(ptKey),
 			"new_prefix", maskKey(refreshedPtKey),
@@ -196,7 +186,7 @@ func (k *Keeper) checkOne(apiKey, ptKey, userID string) string {
 
 		if err := k.store.UpdatePtKey(apiKey, refreshedPtKey); err != nil {
 			slog.Error("keepalive: failed to save refreshed pt_key",
-				"user_id", apiKey,
+				"api_key", apiKey,
 				"error", err,
 			)
 		} else {
@@ -206,19 +196,19 @@ func (k *Keeper) checkOne(apiKey, ptKey, userID string) string {
 			verifyClient.SetTimeout(15 * time.Second)
 			if verifyErr := verifyClient.Validate(); verifyErr != nil {
 				slog.Error("keepalive: refreshed pt_key verification FAILED",
-					"user_id", apiKey,
+					"api_key", apiKey,
 					"user_id", userID,
 					"error", verifyErr,
 				)
 			} else {
 				slog.Info("keepalive: refreshed pt_key verified OK",
-					"user_id", apiKey,
+					"api_key", apiKey,
 					"user_id", userID,
 				)
 			}
 
 			slog.Info("keepalive: pt_key refreshed and saved",
-				"user_id", apiKey,
+				"api_key", apiKey,
 				"user_id", userID,
 			)
 		}
@@ -228,7 +218,7 @@ func (k *Keeper) checkOne(apiKey, ptKey, userID string) string {
 		k.store.UpdateCredentialRefreshedAt(apiKey)
 
 		slog.Info("keepalive: account valid, no refresh needed",
-			"user_id", apiKey,
+			"api_key", apiKey,
 			"user_id", userID,
 			"duration", checkDuration,
 		)

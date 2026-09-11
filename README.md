@@ -2,7 +2,7 @@
 
 # JoyCode2Api
 
-**JoyCode → Anthropic / OpenAI 协议翻译器**
+**Claude Code / Codex / Cursor 直连 JoyCode 的 API 代理**
 
 让 Claude Code、Cursor、Codex 直接用上 JoyCode 背后的模型
 
@@ -21,19 +21,21 @@
 
 ## 概述
 
-JoyCode（京东 AI 编程助手）背后挂了 GLM、Kimi、MiniMax、Doubao、Claude-Opus 等模型，但它的 API 是私有协议，主流编程工具接不上。JoyCode2Api 在中间做协议翻译，对外同时暴露两套标准协议：
+JoyCode（京东 AI 编程助手）背后挂了 GLM、Kimi、MiniMax、Doubao、Claude-Opus 等模型，它的网关本身已经同时提供 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 三套协议。JoyCode2Api 负责的是账号与鉴权，然后把请求原样送到上游对应的协议端点：
 
 ```
 Claude Code ─┐
 Cursor    ───┼──→  JoyCode2Api  ──→  JoyCode API (jd.com)
-Codex     ───┘    (协议翻译层)
+Codex     ───┘    (鉴权 + 直通转发)
 ```
 
 - **Anthropic Messages API** (`/v1/messages`) — Claude Code 走这个
 - **OpenAI Chat Completions API** (`/v1/chat/completions`) — Cursor 等客户端可直接使用
-- **OpenAI Responses API** (`/v1/responses`) — Codex 的 `wire_api = "responses"` 可直接使用；服务会转换后调用 JoyCode Chat Completions
+- **OpenAI Responses API** (`/v1/responses`) — Codex 的 `wire_api = "responses"` 可直接使用
 
-工具调用（tool use）、流式输出（SSE）、上下文截断全部完整翻译，使用体验和原生 API 一致。
+请求体除补上 JoyCode 要求的账号元数据外不做改写，响应（含 SSE 流、状态码和错误体）原样回传：上游返回什么，客户端就拿到什么，不做协议转换、协议重定向或错误兜底。客户端请求了上游不支持的模型或协议时，看到的是 JoyCode 自己的报错。
+
+唯一的例外是响应帧格式。JoyCode 给所有响应都贴 `Content-Type: text/event-stream`，哪怕非流式请求拿到的是单个 JSON 对象；代理把 Content-Type 纠正成与响应体一致，否则按 Content-Type 切换解析方式的客户端会把这段 JSON 当成「一个事件都没有的流」。同理，流式请求如果拿到的是 JSON 错误体（JoyCode 的错误也走 HTTP 200），代理会把它包成客户端协议要求的 error 事件，让上游的报错能显示出来，而不是被当成流被截断。
 
 > ⚠️ **免责声明**：本项目仅供**个人学习和技术研究**使用。禁止用于商业转售、API 中转服务（**中转站属于违法行为**）、大规模薅号或任何违法违规活动。因不当使用造成的一切后果由使用者自行承担，与项目作者无关。本项目不是 JoyCode 官方产品。
 
@@ -43,12 +45,11 @@ Codex     ───┘    (协议翻译层)
 
 | 特性 | 说明 |
 |------|------|
-| **双协议兼容** | 同时实现 Anthropic Messages + OpenAI Chat Completions，Claude Code 和 Cursor 各走各的通道 |
-| **Tool Use 完整翻译** | Claude Code 的工具调用（读写文件、执行命令等）完整映射，不影响正常使用 |
-| **SSE 流式输出** | 实时流式返回，打字机效果 |
+| **三协议直通** | Anthropic Messages / OpenAI Chat Completions / OpenAI Responses 各自直达 JoyCode 的同协议端点，不做跨协议改写 |
+| **请求原样转发** | 工具调用、思考参数、图片等字段按客户端原样上报；只补 JoyCode 要求的账号元数据 |
+| **响应原样回传** | SSE 流式逐块透传，状态码与错误体不加工，上游怎么报就怎么显示；仅纠正 Content-Type 使其与响应体一致，并把 JSON 错误体包成流式客户端认识的 error 事件 |
 | **多模型可选** | JoyAI-Code、Claude-Opus-4.7、GLM-5.1/5/4.7、Kimi-K2.6/2.5、MiniMax-M2.7、Doubao-Seed-2.0-pro |
 | **多账号管理** | Dashboard 扫码 / OAuth / 手动添加多个 JD 账号，每个账号独立 API Key |
-| **智能上下文截断** | 对话过长时自动截断早期消息，`/compact` 正常工作 |
 | **自带 Dashboard** | Web 界面管理账号、查看用量、模型分布、请求记录、系统设置 |
 | **凭据保活** | 后台定时刷新过期账号凭据，避免长时间不用失效 |
 | **单文件部署** | 前端打包进 Go 二进制，丢一个文件就能跑，也支持 Docker / 系统服务 |
@@ -115,9 +116,9 @@ CGO_ENABLED=0 go build -o JoyCode2Api ./cmd/JoyCode2Api/
   JoyCode Proxy 0.6.1
   ─────────────────────────────────────────────────
   Endpoints:
-    POST /v1/chat/completions  — Chat (OpenAI format)
-    POST /v1/responses         — Responses (OpenAI/GPT format)
-    POST /v1/messages          — Chat (Anthropic/Claude Code format)
+    POST /v1/chat/completions  — Chat Completions (OpenAI protocol)
+    POST /v1/responses         — Responses (OpenAI protocol)
+    POST /v1/messages          — Messages (Anthropic protocol)
     ...
   Dashboard:
     http://0.0.0.0:34891 — Web UI
@@ -144,7 +145,10 @@ CGO_ENABLED=0 go build -o JoyCode2Api ./cmd/JoyCode2Api/
 
 **OAuth 在 Docker / 远程部署时**：浏览器会跳转到一个打不开的 `localhost` 页面，这是正常的。把地址栏里完整的 URL（形如 `http://127.0.0.1:34891/?pt_key=xxx&...`）复制下来，粘进弹窗输入框，点「提交授权」。
 
-添加成功后，每个账号会生成独立的 API Key（形如 `sk-joy-xxxx`），在账号列表里能看到。
+添加成功后，每个账号会生成独立的 API Key（形如 `sk-joy-xxxx`），在账号列表和账号详情页能看到。在账号详情页可以：
+
+- **重置 Token**：重新生成一个随机 API Key。
+- **自定义 Token**：把 API Key 改成自己指定的值（要求全局唯一、不含空格，最长 128 个字符）。
 
 ### 第 5 步：接到编程工具
 
@@ -200,6 +204,8 @@ cursor   # 或 codex
 | 变量 | 说明 |
 |------|------|
 | `JOYCODE_STATE_DB` | 指定 JoyCode `state.vscdb` 路径（Docker 挂载场景用） |
+| `JOYCODE_BASE_URL` | JoyCode 上游地址，默认 `http://joycode-api-saas.jd.com` |
+| `JOYCODE_GATEWAY_URL` | 设置后改走公网签名网关（如 `https://api-ai.jd.com`），按 functionId + HMAC 签名路由；留空则直连 `JOYCODE_BASE_URL`。`/v1/rerank` 网关无对应 functionId，网关模式下返回明确错误 |
 
 ### Dashboard 设置项
 
@@ -207,12 +213,10 @@ cursor   # 或 codex
 
 | 分组 | 设置项 | 默认 | 说明 |
 |------|--------|------|------|
-| **模型配置** | `default_model` | `JoyAI-Code` | 客户端未指定模型且账号未配置时的兜底模型 |
-| | `default_max_tokens` | `8192` | 客户端未指定 `max_tokens` 时的默认值 |
-| **连接优化** | `max_retries` | `3` | 请求失败自动重试次数 |
-| | `request_timeout` | `120` | 与 JoyCode 后端通信超时（秒），低于 60 自动调到 60 |
+| **模型配置** | `default_model` | `JoyAI-Code` | 客户端未指定 `model`（空值）且账号未配置默认模型时使用；客户端显式指定的模型不会被改写 |
+| **连接优化** | `request_timeout` | `120` | 与 JoyCode 后端通信超时（秒），低于 60 自动调到 60 |
 | | `max_connections` | `20` | 与后端最大并发 HTTP 连接数，10 秒内生效 |
-| **请求预处理** | `auto_compress_images` | `true` | 在所有 `/v1/*` 请求进入协议处理前自动压缩较大的 base64 图片，避免超过网关 5 MiB 请求体限制；关闭后原图透传 |
+| **请求预处理** | `auto_compress_images` | `true` | 在 `/v1/*` 请求转发前自动压缩较大的 base64 图片，避免超过网关 5 MiB 请求体限制；关闭后原图透传 |
 | **日志与监控** | `enable_request_logging` | `true` | 记录每个请求详情（模型、延迟、状态码），关闭后「数据概览」无数据 |
 | | `log_retention_days` | `30` | 请求日志保留天数，每小时自动清理，`0` 永久保留 |
 
@@ -297,9 +301,9 @@ docker compose up -d --build
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `POST` | `/v1/messages` | Anthropic Messages API（Claude Code） |
-| `POST` | `/v1/chat/completions` | OpenAI Chat Completions API（Cursor 等客户端） |
-| `POST` | `/v1/responses` | OpenAI Responses API（GPT / Codex，内部转发到 JoyCode Chat Completions） |
+| `POST` | `/v1/messages` | Anthropic Messages API（Claude Code），直通 JoyCode Anthropic 端点 |
+| `POST` | `/v1/chat/completions` | OpenAI Chat Completions API（Cursor 等客户端），直通 JoyCode Chat Completions 端点 |
+| `POST` | `/v1/responses` | OpenAI Responses API（GPT / Codex），直通 JoyCode Responses 端点 |
 | `POST` | `/v1/web-search` | 网页搜索 |
 | `POST` | `/v1/rerank` | 文档重排序 |
 | `GET` | `/v1/models` | 可用模型列表 |
@@ -345,9 +349,8 @@ cmd/JoyCode2Api/        CLI 入口 + HTTP 服务器
 └─ *.go                 各子命令（check/models/chat/search/...）
 
 pkg/
-├─ anthropic/           Anthropic 协议翻译（请求/响应/SSE/工具调用/上下文截断）
-├─ openai/              OpenAI 协议翻译（chat/search/rerank/models）
-├─ joycode/             JoyCode 上游客户端（color gateway 签名、gzip、流式）
+├─ api/                 对外端点：鉴权后把请求直通转发到 JoyCode 同协议端点
+├─ joycode/             JoyCode 上游客户端（端点表、ptKey 头、元数据、流式）
 ├─ auth/                凭据检测（state.vscdb）、JD 扫码登录、JWT 中间件、密码
 ├─ store/               SQLite 存储（账号、设置、请求日志、token 用量）
 ├─ dashboard/           Dashboard 后端 API（/api/* 路由）

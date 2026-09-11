@@ -14,38 +14,30 @@ import (
 
 // Credentials holds JoyCode authentication data.
 type Credentials struct {
-	PtKey         string
-	UserID        string
-	ColorBaseURL  string
-	MasterBaseURL string
-	Tenant        string
-	LoginType     string
-	OrgFullName   string
-	RealName      string
+	PtKey       string
+	UserID      string
+	Tenant      string
+	LoginType   string
+	OrgFullName string
+	RealName    string
 	// Source describes which client the credentials were loaded from,
 	// e.g. "ide", "plugin:code", "container" or "env".
 	Source string
 	// Models is the model catalog synced by the JoyCode client (chatApiModel
-	// ids). Only the VS Code extension state carries it; it is used to
-	// resolve Claude ids that drift, e.g. "Claude-Opus-4.7" →
-	// "Claude-Opus-4.7-hq".
+	// ids). Only the VS Code extension state carries it; it feeds the model
+	// list shown by the dashboard.
 	Models []string
-	// ModelAdapters maps chatApiModel ids to the native adapter declared by
-	// the plugin catalog, e.g. "anthropic" or "openai-response".
-	ModelAdapters map[string]string
 }
 
 // stateData mirrors the JoyCode IDE (Electron) login payload stored under
 // key "JoyCoder.IDE" in the IDE's state.vscdb.
 type stateData struct {
 	JoyCoderUser struct {
-		PtKey         string `json:"ptKey"`
-		UserID        string `json:"userId"`
-		ColorBaseURL  string `json:"colorBaseUrl"`
-		MasterBaseURL string `json:"masterBaseUrl"`
-		Tenant        string `json:"tenant"`
-		LoginType     string `json:"loginType"`
-		OrgFullName   string `json:"orgFullName"`
+		PtKey       string `json:"ptKey"`
+		UserID      string `json:"userId"`
+		Tenant      string `json:"tenant"`
+		LoginType   string `json:"loginType"`
+		OrgFullName string `json:"orgFullName"`
 	} `json:"joyCoderUser"`
 }
 
@@ -55,14 +47,12 @@ type stateData struct {
 // model catalog is synced into "remoteModelConfigs".
 type pluginStateData struct {
 	JdhLoginInfo struct {
-		PtKey         string `json:"ptKey"`
-		UserID        string `json:"userId"`
-		ColorBaseURL  string `json:"colorBaseUrl"`
-		MasterBaseURL string `json:"masterBaseUrl"`
-		Tenant        string `json:"tenant"`
-		LoginType     string `json:"loginType"`
-		OrgFullName   string `json:"orgFullName"`
-		RealName      string `json:"realName"`
+		PtKey       string `json:"ptKey"`
+		UserID      string `json:"userId"`
+		Tenant      string `json:"tenant"`
+		LoginType   string `json:"loginType"`
+		OrgFullName string `json:"orgFullName"`
+		RealName    string `json:"realName"`
 	} `json:"jdhLoginInfo"`
 	RemoteModelConfigs []struct {
 		ChatAPIModel string `json:"chatApiModel"`
@@ -267,13 +257,11 @@ func parseIDEState(value string) (*Credentials, error) {
 		return nil, fmt.Errorf("userId is empty in stored credentials\n  Please re-login to JoyCode IDE")
 	}
 	return &Credentials{
-		PtKey:         data.JoyCoderUser.PtKey,
-		UserID:        data.JoyCoderUser.UserID,
-		ColorBaseURL:  data.JoyCoderUser.ColorBaseURL,
-		MasterBaseURL: data.JoyCoderUser.MasterBaseURL,
-		Tenant:        data.JoyCoderUser.Tenant,
-		LoginType:     data.JoyCoderUser.LoginType,
-		OrgFullName:   data.JoyCoderUser.OrgFullName,
+		PtKey:       data.JoyCoderUser.PtKey,
+		UserID:      data.JoyCoderUser.UserID,
+		Tenant:      data.JoyCoderUser.Tenant,
+		LoginType:   data.JoyCoderUser.LoginType,
+		OrgFullName: data.JoyCoderUser.OrgFullName,
 	}, nil
 }
 
@@ -290,11 +278,10 @@ func parsePluginState(value string) (*Credentials, error) {
 		return nil, fmt.Errorf("userId is empty in extension credentials\n  Please re-login to the JoyCode extension")
 	}
 
-	// Harvest the visible tenant model catalog (chatApiModel ids) so Claude
-	// requests can be mapped to ids that actually exist upstream.
+	// Harvest the visible tenant model catalog (chatApiModel ids) for the
+	// dashboard's model list.
 	models := make([]string, 0, len(data.RemoteModelConfigs))
 	seen := make(map[string]bool, len(data.RemoteModelConfigs))
-	adapters := make(map[string]string)
 	for _, m := range data.RemoteModelConfigs {
 		name := strings.TrimSpace(m.ChatAPIModel)
 		if name == "" || m.IsHidden || m.Hidden || seen[name] {
@@ -302,41 +289,17 @@ func parsePluginState(value string) (*Credentials, error) {
 		}
 		seen[name] = true
 		models = append(models, name)
-		if adapter := parseModelAdapter(m.Ext); adapter != "" {
-			adapters[name] = adapter
-		}
 	}
 
 	return &Credentials{
-		PtKey:         login.PtKey,
-		UserID:        login.UserID,
-		ColorBaseURL:  login.ColorBaseURL,
-		MasterBaseURL: login.MasterBaseURL,
-		Tenant:        login.Tenant,
-		LoginType:     login.LoginType,
-		OrgFullName:   login.OrgFullName,
-		RealName:      login.RealName,
-		Models:        models,
-		ModelAdapters: adapters,
+		PtKey:       login.PtKey,
+		UserID:      login.UserID,
+		Tenant:      login.Tenant,
+		LoginType:   login.LoginType,
+		OrgFullName: login.OrgFullName,
+		RealName:    login.RealName,
+		Models:      models,
 	}, nil
-}
-
-// parseModelAdapter handles both plugin encodings observed in the wild: ext
-// may be a JSON object or a JSON string containing that object.
-func parseModelAdapter(ext any) string {
-	var value map[string]any
-	switch v := ext.(type) {
-	case map[string]any:
-		value = v
-	case string:
-		if json.Unmarshal([]byte(v), &value) != nil {
-			return ""
-		}
-	default:
-		return ""
-	}
-	adapter, _ := value["adapterType"].(string)
-	return strings.ToLower(strings.TrimSpace(adapter))
 }
 
 // sqliteReadOnlyURI builds a cross-platform SQLite URI with read-only mode.
