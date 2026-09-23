@@ -8,8 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 	"testing"
+	"time"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/keepalive"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
@@ -137,8 +137,8 @@ func TestHandleAddAndListAccounts(t *testing.T) {
 
 	// Add account
 	req := makeRequest(t, "POST", "/api/accounts", map[string]interface{}{
-		"user_id": "test-user",
-		"pt_key":  "test-pt",
+		"user_id":  "test-user",
+		"pt_key":   "test-pt",
 		"nickname": "TestNick",
 	})
 	w := httptest.NewRecorder()
@@ -272,12 +272,8 @@ func TestHandleModels(t *testing.T) {
 	if !ok {
 		t.Fatalf("models is not a list: %T", m["models"])
 	}
-	if len(models) == 0 {
-		t.Error("expected at least 1 model")
-	}
-	first := models[0].(map[string]interface{})
-	if first["id"] == "" || first["name"] == "" {
-		t.Error("model should have id and name")
+	if len(models) != 0 {
+		t.Fatal("expected empty list without an account")
 	}
 }
 

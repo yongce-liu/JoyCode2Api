@@ -169,6 +169,9 @@ const antTheme = {
       controlHeightSM: 28,
       primaryShadow: '0 2px 6px rgba(34, 197, 94, 0.2)',
       defaultShadow: 'none',
+      // antd 默认 dangerShadow 用的是浅色算法下的 colorErrorOutline（#fff2f0），
+      // 会在按钮下方画出一条显眼的白边
+      dangerShadow: 'none',
       dashShadow: 'none',
     },
     Input: {

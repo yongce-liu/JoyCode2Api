@@ -84,6 +84,10 @@ func requireGET(w http.ResponseWriter, r *http.Request) bool {
 		w.WriteHeader(200)
 		return false
 	}
+	if r.Method != http.MethodGet {
+		writeError(w, 405, "method not allowed")
+		return false
+	}
 	return true
 }
 

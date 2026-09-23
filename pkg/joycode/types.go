@@ -13,3 +13,14 @@ type ModelInfo struct {
 	ModelID            string   `json:"modelId"`
 	CreateTime         int64    `json:"createTime"`
 }
+
+// ID is the callable model identifier; labels are only a last-resort fallback.
+func (m ModelInfo) ID() string {
+	if m.ModelID != "" {
+		return m.ModelID
+	}
+	if m.ChatAPIModel != "" {
+		return m.ChatAPIModel
+	}
+	return m.Label
+}

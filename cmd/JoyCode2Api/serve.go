@@ -33,9 +33,9 @@ import (
 )
 
 var (
-	serveHost       string
-	servePort       int
-	serveTLS        bool
+	serveHost      string
+	servePort      int
+	serveTLS       bool
 	requestCounter uint64
 )
 
@@ -413,8 +413,12 @@ func requestLogMiddleware(next http.Handler, s *store.Store) http.Handler {
 			latency := time.Since(start).Milliseconds()
 
 			var errMsg string
+			if requestErr := store.GetRequestError(r); requestErr.Status != 0 {
+				rw.statusCode = requestErr.Status
+				errMsg = requestErr.Message
+			}
 			if rw.statusCode >= 400 {
-				errMsg = fmt.Sprintf("HTTP %d on %s %s", rw.statusCode, r.Method, path)
+				errMsg = fmt.Sprintf("HTTP %d on %s %s: %s", rw.statusCode, r.Method, path, errMsg)
 				if body := strings.TrimSpace(rw.body.String()); body != "" {
 					errMsg = fmt.Sprintf("%s\n%s", errMsg, body)
 				}
@@ -433,12 +437,12 @@ func requestLogMiddleware(next http.Handler, s *store.Store) http.Handler {
 			var inTk, outTk int
 			inTk, outTk = store.GetTokenUsage(r)
 			resolvedModel := store.GetModel(r)
-				if resolvedModel != "" {
-					model = resolvedModel
-				}
-				if s.GetSetting("enable_request_logging") != "false" {
-					go s.LogRequest(apiKey, model, path, isStream, rw.statusCode, latency, errMsg, inTk, outTk)
-				}
+			if resolvedModel != "" {
+				model = resolvedModel
+			}
+			if s.GetSetting("enable_request_logging") != "false" {
+				go s.LogRequest(apiKey, model, path, isStream, rw.statusCode, latency, errMsg, inTk, outTk)
+			}
 		}
 	})
 }

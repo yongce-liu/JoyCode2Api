@@ -70,7 +70,8 @@ const MainLayout: React.FC = () => {
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             boxShadow: '0 2px 8px rgba(34, 197, 94, 0.3)',
           }}>
-            <img src="/favicon.ico" alt="JoyCode" style={{ width: 18, height: 18, filter: 'brightness(0) invert(1)' }} />
+            {/* favicon.ico 是不透明深底方块，反色后会糊成白色方块；svg 是透明底闪电图标 */}
+            <img src="/favicon.svg" alt="JoyCode" style={{ width: 18, height: 18, filter: 'brightness(0) invert(1)' }} />
           </div>
           {!collapsed && <Text strong style={{ fontSize: 14, letterSpacing: 0.2 }}>JoyCode 代理</Text>}
         </div>

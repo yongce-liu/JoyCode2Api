@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/common"
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/imageinput"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
 )
@@ -19,6 +20,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
 	}
+	imageinput.Prepare(r, s.store)
 	var req ChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		slog.Error("decode chat request", "error", err)
@@ -30,8 +32,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		systemDefault = s.store.GetSetting("default_model")
 	}
 	model := ResolveModel(req.Model, store.GetAccountDefaultModel(r), systemDefault)
-		store.SetModel(r, model)
-		jcBody := TranslateRequest(&req)
+	store.SetModel(r, model)
+	req.Model = model
+	jcBody := TranslateRequest(&req)
 	client := s.getClient(r)
 	if req.Stream {
 		s.handleStreamChat(w, r, client, jcBody, model)
@@ -42,10 +45,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleNonStreamChat(w http.ResponseWriter, r *http.Request, client *joycode.Client, jcBody map[string]interface{}, model string) {
 	resp, err := client.Post("/api/saas/openai/v1/chat/completions", jcBody)
+	if s.retryWithoutEffort(jcBody, err) {
+		resp, err = client.Post("/api/saas/openai/v1/chat/completions", jcBody)
+	}
 	if err != nil {
 		slog.Error("chat non-stream upstream error", "model", model, "error", err)
 		msg := err.Error()
-		code := 500
+		code := upstreamStatus(err)
 		if isTimeoutError(msg) {
 			code = 504
 			msg = "上游服务响应超时，请稍后重试。原始错误: " + msg
@@ -99,6 +105,9 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request, client
 
 	streamStart := time.Now()
 	resp, err := client.PostStream("/api/saas/openai/v1/chat/completions", jcBody)
+	if s.retryWithoutEffort(jcBody, err) {
+		resp, err = client.PostStream("/api/saas/openai/v1/chat/completions", jcBody)
+	}
 	if err != nil {
 		close(stopHeartbeat)
 		<-heartbeatDone
@@ -107,7 +116,8 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request, client
 		if isTimeoutError(msg) {
 			msg = "上游服务响应超时，请稍后重试。原始错误: " + msg
 		}
-		fmt.Fprintf(w, "data: {\"error\":{\"message\":\"%s\"}}\n\n", msg)
+		store.SetRequestError(r, upstreamStatus(err), msg)
+		writeStreamError(w, msg)
 		flusher.Flush()
 		fmt.Fprint(w, "data: [DONE]\n\n")
 		flusher.Flush()
@@ -126,6 +136,7 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request, client
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var inTk, outTk int
 	sawDone := false
+	sawFinish := false
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
@@ -134,32 +145,52 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request, client
 			flusher.Flush()
 			continue
 		}
-		if strings.Contains(line, "[DONE]") {
+		if strings.TrimSpace(strings.TrimPrefix(line, "data:")) == "[DONE]" {
 			sawDone = true
 		}
 		w.Write([]byte(line))
 		w.Write([]byte("\n"))
 		flusher.Flush()
 		// Extract usage from data lines (the final chunk carries usage stats)
-		if strings.HasPrefix(line, "data: ") && !strings.Contains(line, "[DONE]") {
+		if strings.HasPrefix(line, "data:") && !sawDone {
 			var chunk struct {
+				Choices []struct {
+					FinishReason *string `json:"finish_reason"`
+				} `json:"choices"`
 				Usage *struct {
 					PromptTokens     int `json:"prompt_tokens"`
 					CompletionTokens int `json:"completion_tokens"`
 				} `json:"usage"`
 			}
-			if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk) == nil && chunk.Usage != nil {
-				inTk = chunk.Usage.PromptTokens
-				outTk = chunk.Usage.CompletionTokens
+			if upstreamErr := joycode.ResponseError([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:")))); upstreamErr != nil {
+				store.SetRequestError(r, upstreamStatus(upstreamErr), upstreamErr.Error())
+			}
+			if json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))), &chunk) == nil {
+				for _, choice := range chunk.Choices {
+					if choice.FinishReason != nil {
+						sawFinish = true
+					}
+				}
+
+				if chunk.Usage != nil {
+					inTk = chunk.Usage.PromptTokens
+					outTk = chunk.Usage.CompletionTokens
+				}
 			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		slog.Error("chat stream read error", "model", model, "error", err)
+		store.SetRequestError(r, 502, err.Error())
+		writeStreamError(w, err.Error())
 	}
 	// Ensure the stream terminates with [DONE]. Some upstream responses omit it
 	// (e.g. premature close, certain error paths), leaving clients like
 	// CherryStudio hanging in "generating" state. Always send a final [DONE].
+	if !sawDone && !sawFinish && store.GetRequestError(r).Status == 0 {
+		store.SetRequestError(r, 502, "upstream stream ended before completion")
+		writeStreamError(w, "upstream stream ended before completion")
+	}
 	if !sawDone {
 		slog.Warn("stream ended without [DONE], sending terminator", "model", model)
 		w.Write([]byte("data: [DONE]\n\n"))
@@ -172,4 +203,42 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request, client
 
 func isTimeoutError(msg string) bool {
 	return common.IsTimeoutError(errors.New(msg))
+}
+
+func upstreamStatus(err error) int {
+	var apiErr *joycode.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode >= 400 && apiErr.StatusCode <= 599 {
+		return apiErr.StatusCode
+	}
+	if err != nil && isTimeoutError(err.Error()) {
+		return 504
+	}
+	return 502
+}
+func writeStreamError(w http.ResponseWriter, message string) {
+	data, _ := json.Marshal(map[string]interface{}{"error": map[string]string{"message": message, "type": "api_error"}})
+	fmt.Fprintf(w, "data: %s\n\n", data)
+}
+
+// Only retry an explicit parameter conflict, never quota/auth/network failures.
+func (s *Server) retryWithoutEffort(body map[string]interface{}, err error) bool {
+	if s.store == nil || s.store.GetSetting("reasoning_tool_fallback") != "true" || body["reasoning_effort"] == nil {
+		return false
+	}
+	tools, ok := body["tools"].([]interface{})
+	if !ok || len(tools) == 0 {
+		return false
+	}
+	var apiErr *joycode.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != 400 {
+		return false
+	}
+	msg := strings.ToLower(apiErr.Body)
+	if !strings.Contains(msg, "reasoning_effort") || !strings.Contains(msg, "tool") ||
+		!(strings.Contains(msg, "not support") || strings.Contains(msg, "unsupported") || strings.Contains(msg, "cannot") || strings.Contains(msg, "incompatible")) {
+		return false
+	}
+	delete(body, "reasoning_effort")
+	slog.Warn("upstream rejected reasoning effort with tools; retrying without effort", "model", body["model"])
+	return true
 }

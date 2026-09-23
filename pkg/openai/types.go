@@ -4,16 +4,21 @@ import "encoding/json"
 
 // ChatRequest is the OpenAI-compatible chat completion request.
 type ChatRequest struct {
-	Model       string          `json:"model"`
-	Messages    json.RawMessage `json:"messages"`
-	Stream      bool            `json:"stream,omitempty"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	TopP        *float64        `json:"top_p,omitempty"`
-	Tools       json.RawMessage `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
-	Stop        json.RawMessage `json:"stop,omitempty"`
-	Thinking    json.RawMessage `json:"thinking,omitempty"`
+	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
+	MaxCompletionTokens int             `json:"max_completion_tokens,omitempty"`
+	ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
+	StreamOptions       json.RawMessage `json:"stream_options,omitempty"`
+	ResponseFormat      json.RawMessage `json:"response_format,omitempty"`
+	Model               string          `json:"model"`
+	Messages            json.RawMessage `json:"messages"`
+	Stream              bool            `json:"stream,omitempty"`
+	MaxTokens           int             `json:"max_tokens,omitempty"`
+	Temperature         *float64        `json:"temperature,omitempty"`
+	TopP                *float64        `json:"top_p,omitempty"`
+	Tools               json.RawMessage `json:"tools,omitempty"`
+	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
+	Stop                json.RawMessage `json:"stop,omitempty"`
+	Thinking            json.RawMessage `json:"thinking,omitempty"`
 }
 
 // ModelCapability describes a model's feature set.

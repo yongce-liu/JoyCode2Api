@@ -22,11 +22,11 @@ func TestResolveModel_KnownJoyCodePassThrough(t *testing.T) {
 	}
 }
 
-func TestResolveModel_UnknownDefaults(t *testing.T) {
-	// Unknown model with no overrides defaults to JoyAI-Code.
+func TestResolveModel_UnknownPassesThrough(t *testing.T) {
+	// Explicit model IDs are validated by upstream, not a stale allowlist.
 	got := resolveModel("some-unknown-model-xyz", "", "")
-	if got != joycode.DefaultModel {
-		t.Errorf("resolveModel(unknown) = %q, want %s", got, joycode.DefaultModel)
+	if got != "some-unknown-model-xyz" {
+		t.Errorf("resolveModel(unknown) = %q, want explicit model", got)
 	}
 }
 

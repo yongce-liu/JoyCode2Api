@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/common"
+	"github.com/vibe-coding-labs/JoyCode2Api/pkg/imageinput"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
 )
@@ -58,6 +59,7 @@ func (h *Handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	imageinput.Prepare(r, h.store)
 	var req MessageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		reqLog(r).Error("decode anthropic request", "error", err)
@@ -75,14 +77,14 @@ func (h *Handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		req.MaxTokens = 32768
 	}
 
-		accountDefault := store.GetAccountDefaultModel(r)
-		systemDefault := ""
-		if h.store != nil {
-			systemDefault = h.store.GetSetting("default_model")
-		}
-		resolved := resolveModel(req.Model, accountDefault, systemDefault)
-		store.SetModel(r, resolved)
-		reqLog(r).Info("anthropic request", "model", req.Model, "resolved", resolved, "stream", req.Stream, "max_tokens", req.MaxTokens, "messages", len(req.Messages), "tools", len(req.Tools))
+	accountDefault := store.GetAccountDefaultModel(r)
+	systemDefault := ""
+	if h.store != nil {
+		systemDefault = h.store.GetSetting("default_model")
+	}
+	resolved := resolveModel(req.Model, accountDefault, systemDefault)
+	store.SetModel(r, resolved)
+	reqLog(r).Info("anthropic request", "model", req.Model, "resolved", resolved, "stream", req.Stream, "max_tokens", req.MaxTokens, "messages", len(req.Messages), "tools", len(req.Tools))
 
 	client := h.getClient(r)
 
@@ -155,7 +157,7 @@ func (h *Handler) handleNonStream(w http.ResponseWriter, r *http.Request, req *M
 		}
 		if strings.Contains(errMsg, "content_filter") || strings.Contains(errMsg, "SENSITIVE_CONTENT") {
 			reqLog(r).Warn("upstream content_filter (non-stream), returning detailed error")
-				writeContentFilterError(w, errMsg)
+			writeContentFilterError(w, errMsg)
 			return
 		}
 		writeAnthropicError(w, 500, errMsg)

@@ -63,7 +63,7 @@ const LoginPage: React.FC = () => {
       </Tooltip>
       <div className="jc-auth-card">
         <div className="jc-auth-logo">
-          <img src="/favicon.ico" alt="JoyCode" style={{ width: 28, height: 28, filter: 'brightness(0) invert(1)' }} />
+          <img src="/favicon.svg" alt="JoyCode" style={{ width: 28, height: 28, filter: 'brightness(0) invert(1)' }} />
         </div>
         <div style={{ textAlign: 'center', marginBottom: 28 }}>
           <Title level={3} style={{ marginBottom: 4 }}>JoyCode 代理</Title>

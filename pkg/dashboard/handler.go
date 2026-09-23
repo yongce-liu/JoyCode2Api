@@ -20,19 +20,18 @@ import (
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/auth"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/keepalive"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/proxy"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
+	_ "modernc.org/sqlite"
 )
 
 type Handler struct {
-	store     *store.Store
-	staticFS  fs.FS
-	modelList []string
-	keeper    *keepalive.Keeper
+	store    *store.Store
+	staticFS fs.FS
+	keeper   *keepalive.Keeper
 	// Version is the proxy version reported by /api/health; set by the server
 	// at startup (the build-time Version lives in package main).
 	Version string
@@ -40,10 +39,9 @@ type Handler struct {
 
 func NewHandler(s *store.Store, staticFS fs.FS, k *keepalive.Keeper) *Handler {
 	return &Handler{
-		store:     s,
-		staticFS:  staticFS,
-		modelList: joycode.Models,
-		keeper:    k,
+		store:    s,
+		staticFS: staticFS,
+		keeper:   k,
 	}
 }
 
@@ -187,16 +185,16 @@ func (h *Handler) handleErrors(w http.ResponseWriter, r *http.Request) {
 // commonly hit without the /v1/ prefix. When these paths arrive at the
 // SPA catch-all we return a JSON 404 with a helpful hint instead of HTML.
 var knownAPISet = map[string]bool{
-	"/chat/completions":      true,
-	"/completions":           true,
-	"/messages":              true,
-	"/models":                true,
-	"/embeddings":            true,
-	"/web-search":            true,
-	"/rerank":                true,
-	"/images/generations":    true,
-	"/audio/transcriptions":  true,
-	"/audio/translations":    true,
+	"/chat/completions":     true,
+	"/completions":          true,
+	"/messages":             true,
+	"/models":               true,
+	"/embeddings":           true,
+	"/web-search":           true,
+	"/rerank":               true,
+	"/images/generations":   true,
+	"/audio/transcriptions": true,
+	"/audio/translations":   true,
 }
 
 // ServeStatic serves the SPA frontend for non-API routes.
@@ -525,7 +523,11 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 		statuses := h.keeper.GetAllStatuses()
 		for i := range accounts {
 			if s, ok := statuses[accounts[i].UserID]; ok {
-				if s.Valid { accounts[i].CredentialValid = 1 } else { accounts[i].CredentialValid = 0 }
+				if s.Valid {
+					accounts[i].CredentialValid = 1
+				} else {
+					accounts[i].CredentialValid = 0
+				}
 				accounts[i].CredentialCheckedAt = s.LastChecked.Format("2006-01-02 15:04:05")
 				accounts[i].CredentialError = s.ErrorMessage
 			}
@@ -1056,6 +1058,8 @@ func (h *Handler) handleAccountAction(w http.ResponseWriter, r *http.Request) {
 		h.getAccountStats(w, r, apiKey)
 	case action == "logs" && r.Method == http.MethodGet:
 		h.getAccountLogs(w, r, apiKey)
+	case action == "token" && r.Method == http.MethodPut:
+		h.updateToken(w, r, apiKey)
 	case action == "renew-token" && r.Method == http.MethodPost:
 		h.renewToken(w, r, apiKey)
 	case action == "remark" && r.Method == http.MethodPut:
@@ -1151,18 +1155,19 @@ func (h *Handler) listAccountModels(w http.ResponseWriter, r *http.Request, apiK
 		return
 	}
 
+	h.writeAccountModels(w, account)
+}
+
+func (h *Handler) writeAccountModels(w http.ResponseWriter, account *store.Account) {
 	client := joycode.NewClient(account.PtKey, account.UserID)
 	models, err := client.ListModels()
 	if err != nil {
-		slog.Error("list account models", "api_key", apiKey, "error", err)
-		// Fallback to hardcoded list
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"models": modelInfos(h.modelList),
-		})
+		slog.Error("list account models", "user_id", account.UserID, "error", err)
+		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"models": models})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"models": upstreamModelInfos(models)})
 }
 
 func (h *Handler) getAccountStats(w http.ResponseWriter, r *http.Request, apiKey string) {
@@ -1202,14 +1207,41 @@ func (h *Handler) getAccountLogs(w http.ResponseWriter, r *http.Request, apiKey 
 	writeJSON(w, http.StatusOK, map[string]interface{}{"logs": logs, "total": len(logs)})
 }
 
+func (h *Handler) updateToken(w http.ResponseWriter, r *http.Request, userID string) {
+	var body struct {
+		APIToken string `json:"api_token"`
+	}
+	if !readJSONBody(w, r, &body) {
+		return
+	}
+	if err := h.store.UpdateAPIToken(userID, body.APIToken); err != nil {
+		writeTokenError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "api_token": body.APIToken})
+}
+
 func (h *Handler) renewToken(w http.ResponseWriter, r *http.Request, apiKey string) {
 	token, err := h.store.RenewToken(apiKey)
 	if err != nil {
-		slog.Error("renew token", "api_key", apiKey, "error", err)
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeTokenError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "api_token": token})
+}
+
+func writeTokenError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, store.ErrInvalidAPIToken):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, store.ErrAPITokenConflict):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, sql.ErrNoRows):
+		writeError(w, http.StatusNotFound, "account not found")
+	default:
+		slog.Error("update account token failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "更新 Token 失败")
+	}
 }
 
 func (h *Handler) updateRemark(w http.ResponseWriter, r *http.Request, userID string) {
@@ -1312,15 +1344,32 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"models": modelInfos(h.modelList),
-	})
+	account, err := h.store.GetDefaultAccount()
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	if account != nil {
+		h.writeAccountModels(w, account)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"models": []interface{}{}})
 }
 
-func modelInfos(models []string) []map[string]string {
-	result := make([]map[string]string, len(models))
-	for i, m := range models {
-		result[i] = map[string]string{"id": m, "name": m}
+func upstreamModelInfos(models []joycode.ModelInfo) []map[string]string {
+	result := make([]map[string]string, 0, len(models))
+	seen := map[string]bool{}
+	for _, m := range models {
+		id := m.ID()
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		name := m.Label
+		if name == "" {
+			name = id
+		}
+		result = append(result, map[string]string{"id": id, "name": name})
 	}
 	return result
 }
@@ -1358,18 +1407,18 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]interface{}{
-		"total_requests":       stats.TotalRequests,
-		"total_input_tokens":   stats.TotalInputTk,
-		"total_output_tokens":  stats.TotalOutputTk,
-		"accounts_count":       stats.AccountsCount,
-		"avg_latency_ms":       stats.AvgLatencyMs,
-		"error_count":          stats.ErrorCount,
-		"stream_count":         stats.StreamCount,
-		"success_count":        stats.SuccessCount,
-		"by_model":             stats.ByModel,
-		"by_account":           stats.ByAccount,
-		"all_time":             totals,
-		"hourly":               hourly,
+		"total_requests":      stats.TotalRequests,
+		"total_input_tokens":  stats.TotalInputTk,
+		"total_output_tokens": stats.TotalOutputTk,
+		"accounts_count":      stats.AccountsCount,
+		"avg_latency_ms":      stats.AvgLatencyMs,
+		"error_count":         stats.ErrorCount,
+		"stream_count":        stats.StreamCount,
+		"success_count":       stats.SuccessCount,
+		"by_model":            stats.ByModel,
+		"by_account":          stats.ByAccount,
+		"all_time":            totals,
+		"hourly":              hourly,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Table, Button, Space, Modal, Form, Input, Switch, Select,
+  Table, Button, Space, Modal, Form, Input, Switch, AutoComplete,
   message, Popconfirm, Tag, Typography, Alert, Tooltip, Spin,
 } from 'antd';
 import {
@@ -29,22 +29,13 @@ import { CSS } from '@dnd-kit/utilities';
 import SvgClaudeCode from '../components/ClaudeCodeIcon';
 import SvgCodex from '../components/CodexIcon';
 import CommandTooltip from '../components/CommandTooltip';
+import CustomTokenButton from '../components/CustomTokenButton';
 import QRLoginModal from '../components/QRLoginModal';
 import { useNavigate } from 'react-router-dom';
 import { api, accountDisplayName } from '../api';
 import type { Account } from '../api';
 
-const BUILTIN_MODELS = [
-  { label: 'JoyAI-Code（推荐）', value: 'JoyAI-Code' },
-  { label: 'Claude-Opus-4.7', value: 'Claude-Opus-4.7' },
-  { label: 'GLM-5.1', value: 'GLM-5.1' },
-  { label: 'GLM-5', value: 'GLM-5' },
-  { label: 'GLM-4.7', value: 'GLM-4.7' },
-  { label: 'Kimi-K2.6', value: 'Kimi-K2.6' },
-  { label: 'Kimi-K2.5', value: 'Kimi-K2.5' },
-  { label: 'MiniMax-M2.7', value: 'MiniMax-M2.7' },
-  { label: 'Doubao-Seed-2.0-pro', value: 'Doubao-Seed-2.0-pro' },
-];
+
 
 const isClaudeModel = (model?: string) => model === 'Claude-Opus-4.7';
 
@@ -139,6 +130,7 @@ const DragHandle: React.FC<{ id: string }> = ({ id }) => {
 
 const Accounts: React.FC = () => {
   const navigate = useNavigate();
+  const [modelOptions, setModelOptions] = useState<{label: string; value: string}[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -178,6 +170,9 @@ const Accounts: React.FC = () => {
   };
 
   useEffect(() => { fetchAccounts(); }, []);
+  useEffect(() => {
+    if (modalOpen) api.listModels().then(models => setModelOptions(models.map(m => ({label: m.name || m.id, value: m.id})))).catch(() => message.warning('模型刷新失败，可以手动输入模型 ID'));
+  }, [modalOpen]);
 
 
   const handleAdd = async (values: { pt_key: string; user_id: string; is_default?: boolean; default_model?: string }) => {
@@ -313,10 +308,13 @@ const Accounts: React.FC = () => {
       dataIndex: 'api_token',
       key: 'api_token',
       width: 160,
-      render: (token: string) => (
-        <Typography.Text code copyable style={{ fontSize: 12 }}>
-          {token.slice(0, 12)}...{token.slice(-4)}
-        </Typography.Text>
+      render: (token: string, record: Account) => (
+        <Space orientation="vertical" size={4}>
+          <Typography.Text code copyable={{ text: token }} style={{ fontSize: 12 }}>
+            {token.length > 20 ? `${token.slice(0, 12)}...${token.slice(-4)}` : token}
+          </Typography.Text>
+          <CustomTokenButton userId={record.user_id} onSaved={fetchAccounts} />
+        </Space>
       ),
     },
     {
@@ -732,9 +730,9 @@ const Accounts: React.FC = () => {
               </Space>
             }
           >
-            <Select
-              placeholder="留空使用系统默认模型"
-              options={BUILTIN_MODELS}
+            <AutoComplete
+              placeholder="选择或输入模型 ID，留空使用默认模型"
+              options={modelOptions}
               allowClear
             />
           </Form.Item>

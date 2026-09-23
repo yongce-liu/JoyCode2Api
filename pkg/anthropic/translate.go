@@ -184,10 +184,10 @@ func TranslateResponse(jcResp map[string]interface{}, reqModel string) *MessageR
 }
 
 func resolveModel(model string, accountDefault string, systemDefault string) string {
-	for _, m := range joycode.Models {
-		if m == model {
-			return model
-		}
+	// Retain Claude Code's lowercase model-alias routing; other explicit IDs
+	// (including new JoyCode models) must reach the upstream unchanged.
+	if model != "" && !strings.HasPrefix(model, "claude-") {
+		return model
 	}
 	if accountDefault != "" {
 		return accountDefault
@@ -302,8 +302,8 @@ func convertAssistantBlocks(blocks []contentBlock) map[string]interface{} {
 	}
 
 	msg := map[string]interface{}{
-		"role":      "assistant",
-		"content":   strings.Join(textParts, "\n"),
+		"role":    "assistant",
+		"content": strings.Join(textParts, "\n"),
 	}
 	if len(toolCalls) > 0 {
 		msg["tool_calls"] = toolCalls
@@ -508,7 +508,7 @@ func convertToolChoice(raw json.RawMessage) interface{} {
 	case "tool":
 		if tc.Name != "" {
 			return map[string]interface{}{
-				"type": "function",
+				"type":     "function",
 				"function": map[string]string{"name": tc.Name},
 			}
 		}

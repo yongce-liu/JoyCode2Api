@@ -266,14 +266,28 @@ code, pre, .ant-typography code, .jc-mono {
   color: var(--jc-fg) !important;
 }
 
-.ant-btn-dangerous {
+/* Danger buttons: base AND hover must be declared together. If base comes
+ * first and hover later, antd v6 resetStyles inject its own hover rules in
+ * between (background: colorErrorBg — a near-white pink), which silently
+ * overrides our hover rule because our rule never re-introduces `border-color`
+ * / `color` there (cssinjs 的样式短路复用会按 selector 组原样注入)。*/
+/* 选择器必须带 :not(:disabled)，否则优先级低于上面的
+ * .ant-btn-default:hover:not(:disabled)（0,3,0 > 0,2,0），
+ * 悬停时文字会被那条规则的 accent 绿色覆盖。*/
+.ant-btn-dangerous,
+.ant-btn-dangerous:hover:not(:disabled),
+.ant-btn-dangerous:focus-visible,
+.ant-btn-dangerous:active:not(:disabled) {
   border-color: var(--jc-danger) !important;
   color: var(--jc-danger) !important;
 }
 
-.ant-btn-dangerous:hover {
+.ant-btn-dangerous:hover:not(:disabled),
+.ant-btn-dangerous:focus-visible,
+.ant-btn-dangerous:active:not(:disabled) {
   background: var(--jc-danger) !important;
   color: #fff !important;
+  border-color: var(--jc-danger) !important;
 }
 
 /* ─── Tags — subtle dark backgrounds ──────────────────────────── */

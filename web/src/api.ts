@@ -199,6 +199,10 @@ export const api = {
     request<AccountStats>(`/api/accounts/${encodeURIComponent(userId)}/stats`),
   getAccountLogs: (userId: string, limit = 200) =>
     request<{ logs: RequestLog[]; total: number }>(`/api/accounts/${encodeURIComponent(userId)}/logs?limit=${limit}`),
+  updateToken: (userId: string, apiToken: string) =>
+    request<{ ok: boolean; api_token: string }>(`/api/accounts/${encodeURIComponent(userId)}/token`, {
+      method: 'PUT', body: JSON.stringify({ api_token: apiToken }),
+    }),
   renewToken: (userId: string) =>
     request<{ ok: boolean; api_token: string }>(`/api/accounts/${encodeURIComponent(userId)}/renew-token`, { method: 'POST' }),
   autoLogin: () =>

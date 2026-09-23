@@ -1,0 +1,12 @@
+.git
+web/node_modules
+node_modules
+joycode-data
+*.db
+*.db-*
+.enc_key
+.env
+.env.*
+*.log
+bin
+dist

@@ -20,7 +20,7 @@ func TestResolveModel(t *testing.T) {
 		{"known joycode model passes through", "GLM-4.7", "", "", "GLM-4.7"},
 		{"unknown model falls back to default", "claude-sonnet-4-20250514", "", "", joycode.DefaultModel},
 		{"account default overrides for unknown model", "claude-opus-4", "Kimi-K2.6", "GLM-5.1", "Kimi-K2.6"},
-		{"system default used when no account default", "unknown-model", "", "GLM-5.1", "GLM-5.1"},
+		{"system default used when no model", "", "", "GLM-5.1", "GLM-5.1"},
 	}
 	for _, tt := range tests {
 		got := resolveModel(tt.model, tt.accountDefault, tt.systemDefault)

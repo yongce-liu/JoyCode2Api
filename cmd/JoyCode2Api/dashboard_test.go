@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
@@ -34,7 +35,12 @@ func TestDashboardEndpoints(t *testing.T) {
 	tmpHome := t.TempDir()
 
 	cmd := exec.Command(bin, "serve", "--port", fmt.Sprintf("%d", port), "--skip-validation", "--ptkey", "test", "--userid", "test", "--tls=false")
-	cmd.Env = append(os.Environ(), "HOME="+tmpHome)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"code":0,"data":[{"modelId":"dynamic-model","label":"Dynamic model"}]}`)
+	}))
+	defer upstream.Close()
+	cmd.Env = append(os.Environ(), "HOME="+tmpHome, "JOYCODE_COLOR_BASE_URL="+upstream.URL)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	if err := cmd.Start(); err != nil {
@@ -168,7 +174,12 @@ func TestStaticFileServing(t *testing.T) {
 	tmpHome := t.TempDir()
 
 	cmd := exec.Command(bin, "serve", "--port", fmt.Sprintf("%d", port), "--skip-validation", "--ptkey", "test", "--userid", "test", "--tls=false")
-	cmd.Env = append(os.Environ(), "HOME="+tmpHome)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"code":0,"data":[{"modelId":"dynamic-model","label":"Dynamic model"}]}`)
+	}))
+	defer upstream.Close()
+	cmd.Env = append(os.Environ(), "HOME="+tmpHome, "JOYCODE_COLOR_BASE_URL="+upstream.URL)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	cmd.Start()
@@ -235,7 +246,12 @@ func TestOpenAPIEndpoints(t *testing.T) {
 	tmpHome := t.TempDir()
 
 	cmd := exec.Command(bin, "serve", "--port", fmt.Sprintf("%d", port), "--skip-validation", "--ptkey", "test", "--userid", "test", "--tls=false")
-	cmd.Env = append(os.Environ(), "HOME="+tmpHome)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"code":0,"data":[{"modelId":"dynamic-model","label":"Dynamic model"}]}`)
+	}))
+	defer upstream.Close()
+	cmd.Env = append(os.Environ(), "HOME="+tmpHome, "JOYCODE_COLOR_BASE_URL="+upstream.URL)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	cmd.Start()

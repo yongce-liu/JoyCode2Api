@@ -42,6 +42,21 @@ func TranslateRequest(req *ChatRequest) map[string]interface{} {
 	if len(req.Thinking) > 0 && ReasoningModels[req.Model] {
 		body["thinking"] = json.RawMessage(req.Thinking)
 	}
+	if req.ReasoningEffort != "" {
+		body["reasoning_effort"] = req.ReasoningEffort
+	}
+	if req.MaxCompletionTokens > 0 {
+		body["max_completion_tokens"] = req.MaxCompletionTokens
+	}
+	if req.ParallelToolCalls != nil {
+		body["parallel_tool_calls"] = *req.ParallelToolCalls
+	}
+	if len(req.StreamOptions) > 0 {
+		body["stream_options"] = req.StreamOptions
+	}
+	if len(req.ResponseFormat) > 0 {
+		body["response_format"] = req.ResponseFormat
+	}
 	return body
 }
 
@@ -62,9 +77,9 @@ func TranslateResponse(jcResp map[string]interface{}, model string) map[string]i
 func TranslateModels(jcModels []joycode.ModelInfo) map[string]interface{} {
 	data := make([]map[string]interface{}, 0, len(jcModels))
 	for _, m := range jcModels {
-		mid := m.ModelID
+		mid := m.ID()
 		if mid == "" {
-			mid = m.Label
+			continue
 		}
 		entry := map[string]interface{}{
 			"id": mid, "object": "model",
@@ -101,13 +116,11 @@ func newShortID() string {
 }
 
 // ResolveModel returns the model to use for the request.
-// If the client-specified model is a known JoyCode model, pass it through.
-// Otherwise fall back to the account's default model, then the global default.
+// Explicit IDs are passed upstream, including unlisted models. Defaults only
+// apply when the caller omitted the model.
 func ResolveModel(model string, accountDefault string, systemDefault string) string {
-	for _, m := range joycode.Models {
-		if m == model {
-			return model
-		}
+	if model != "" {
+		return model
 	}
 	if accountDefault != "" {
 		return accountDefault

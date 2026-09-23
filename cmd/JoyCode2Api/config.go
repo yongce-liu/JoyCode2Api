@@ -67,14 +67,7 @@ var configCmd = &cobra.Command{
 
 		// Models
 		fmt.Println()
-		fmt.Println("  Available Models:")
-		for _, m := range joycode.Models {
-			suffix := ""
-			if m == joycode.DefaultModel {
-				suffix = " (default)"
-			}
-			fmt.Printf("    - %s%s\n", m, suffix)
-		}
+		fmt.Println("  Available Models: run 'JoyCode2Api models' to refresh from upstream")
 
 		return nil
 	},

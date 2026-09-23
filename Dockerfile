@@ -3,7 +3,18 @@
 # 国内示例：--build-arg ALPINE_MIRROR=https://mirrors.aliyun.com/alpine
 ARG ALPINE_MIRROR=https://dl-cdn.alpinelinux.org/alpine
 
-FROM golang:1.25-alpine AS builder
+ARG NODE_IMAGE=node:22-alpine
+ARG GO_IMAGE=golang:1.25-alpine
+ARG RUNTIME_IMAGE=alpine:3.19
+
+FROM ${NODE_IMAGE} AS frontend
+WORKDIR /app/web
+COPY web/package*.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
+FROM ${GO_IMAGE} AS builder
 
 ARG ALPINE_MIRROR
 RUN sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" /etc/apk/repositories \
@@ -15,9 +26,10 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+COPY --from=frontend /app/cmd/JoyCode2Api/static ./cmd/JoyCode2Api/static
 RUN CGO_ENABLED=1 go build -ldflags "-s -w" -o /JoyCode2Api ./cmd/JoyCode2Api
 
-FROM alpine:3.19
+FROM ${RUNTIME_IMAGE}
 
 ARG ALPINE_MIRROR
 RUN sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" /etc/apk/repositories \

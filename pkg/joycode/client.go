@@ -1,6 +1,7 @@
 package joycode
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"crypto/hmac"
@@ -53,18 +54,6 @@ var colorEndpoints = map[string]colorEndpoint{
 	"/api/saas/openai/v1/web-search":       {"web_search", "/api/saas/openai/v2/web-search"},
 	"/api/saas/user/v1/userInfo":           {"joycode_userInfo", "/api/saas/user/v2/userInfo"},
 	"/api/saas/anthropic/v1/messages":      {"anthropic_completions", "/api/saas/anthropic/v1/messages"},
-}
-
-var Models = []string{
-	"JoyAI-Code",
-	"Claude-Opus-4.7",
-	"MiniMax-M2.7",
-	"Kimi-K2.6",
-	"Kimi-K2.5",
-	"GLM-5.1",
-	"GLM-5",
-	"GLM-4.7",
-	"Doubao-Seed-2.0-pro",
 }
 
 type Client struct {
@@ -381,12 +370,17 @@ func (c *Client) Post(endpoint string, body map[string]interface{}) (map[string]
 	}
 	if resp.StatusCode != 200 {
 		slog.Error("upstream non-200", "endpoint", endpoint, "status", resp.StatusCode, "body", truncate(string(data), 500))
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(data))
+		return nil, &APIError{StatusCode: resp.StatusCode, Body: string(data)}
 	}
 	var result map[string]interface{}
 	if err := json.Unmarshal(data, &result); err != nil {
 		slog.Error("unmarshal upstream response", "endpoint", endpoint, "error", err)
 		return nil, fmt.Errorf("invalid JSON response (parse error: %s): %s", err.Error(), truncate(string(data), 500))
+	}
+	if endpoint == "/api/saas/openai/v1/chat/completions" {
+		if err := ResponseError(data); err != nil {
+			return nil, err
+		}
 	}
 	return result, nil
 }
@@ -401,9 +395,24 @@ func (c *Client) PostStream(endpoint string, body map[string]interface{}) (*http
 		defer resp.Body.Close()
 		data, _ := io.ReadAll(resp.Body)
 		slog.Error("upstream stream non-200", "endpoint", endpoint, "status", resp.StatusCode, "body", truncate(string(data), 500))
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(data))
+		return nil, &APIError{StatusCode: resp.StatusCode, Body: string(data)}
 	}
 	if err := decodeStreamBody(resp); err != nil {
+		resp.Body.Close()
+		return nil, err
+	}
+	if strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
+		data, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		if err := ResponseError(data); err != nil {
+			return nil, err
+		}
+		return nil, &APIError{StatusCode: 502, Body: "expected event stream, received JSON"}
+	}
+	if err := checkStreamError(resp); err != nil {
 		resp.Body.Close()
 		return nil, err
 	}
@@ -420,7 +429,7 @@ func (c *Client) PostAnthropicStream(endpoint string, body map[string]interface{
 		defer resp.Body.Close()
 		data, _ := io.ReadAll(resp.Body)
 		slog.Error("upstream anthropic stream non-200", "endpoint", endpoint, "status", resp.StatusCode, "body", truncate(string(data), 500))
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(data))
+		return nil, &APIError{StatusCode: resp.StatusCode, Body: string(data)}
 	}
 	if err := decodeStreamBody(resp); err != nil {
 		resp.Body.Close()
@@ -520,4 +529,79 @@ func (c *Client) UserInfoWithRefresh() (string, error) {
 
 func truncate(s string, maxLen int) string {
 	return common.Truncate(s, maxLen)
+}
+
+// APIError preserves upstream status for callers and request statistics.
+type APIError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *APIError) Error() string { return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Body) }
+
+// ResponseError recognizes JoyCode errors carried inside a successful HTTP
+// response, including numeric gateway codes and string business codes.
+func ResponseError(data []byte) error {
+	var payload map[string]interface{}
+	if json.Unmarshal(data, &payload) != nil {
+		return nil
+	}
+	failure, hasError := payload["error"]
+	code := payload["code"]
+	if hasError && failure != nil {
+		if e, ok := failure.(map[string]interface{}); ok {
+			code = e["code"]
+		}
+	} else if code == nil || fmt.Sprint(code) == "0" || fmt.Sprint(code) == "200" {
+		return nil
+	}
+	status := 502
+	if n, err := strconv.Atoi(fmt.Sprint(code)); err == nil && n >= 400 && n <= 599 {
+		status = n
+	}
+	if fmt.Sprint(code) == "6002" {
+		status = 404
+	}
+	return &APIError{StatusCode: status, Body: string(data)}
+}
+
+// Inspect the first SSE event before exposing it to callers, so an upstream
+// error can be retried without leaking a failed event into the successful stream.
+// Replay the exact bytes, including comments and separators, for normal events.
+func checkStreamError(resp *http.Response) error {
+	reader := bufio.NewReader(resp.Body)
+	var prefix bytes.Buffer
+	var data []string
+	for prefix.Len() < 1<<20 {
+		line, err := reader.ReadSlice('\n')
+		prefix.Write(line)
+		if err != nil && err != io.EOF {
+			if err == bufio.ErrBufferFull {
+				break
+			}
+			return err
+		}
+		text := strings.TrimSuffix(strings.TrimSuffix(string(line), "\n"), "\r")
+		if strings.HasPrefix(text, "data:") {
+			data = append(data, strings.TrimPrefix(strings.TrimPrefix(text, "data:"), " "))
+		}
+		if (text == "" && len(data) > 0) || err == io.EOF {
+			break
+		}
+	}
+	payload := []byte(strings.Join(data, "\n"))
+	// Some gateway errors are plain JSON despite a text/event-stream header.
+	if len(data) == 0 {
+		payload = prefix.Bytes()
+	}
+	if err := ResponseError(payload); err != nil {
+		return err
+	}
+	resp.Body = &replayReadCloser{Reader: io.MultiReader(bytes.NewReader(prefix.Bytes()), reader), Closer: resp.Body}
+	return nil
+}
+
+type replayReadCloser struct {
+	io.Reader
+	io.Closer
 }

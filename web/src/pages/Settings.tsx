@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Card, Form, Input, Button, InputNumber, Select, Switch, message, Modal,
+  AutoComplete, Card, Form, Input, Button, InputNumber, Select, Switch, message, Modal,
   Skeleton, Space, Row, Col, Tag, Tooltip,
 } from 'antd';
 import {
@@ -34,17 +34,7 @@ const FIELD_GROUPS = [
         tooltip: '当客户端未指定模型，且账号未配置默认模型时使用的 JoyCode 模型',
         placeholder: 'JoyAI-Code',
         type: 'select' as const,
-        options: [
-          { label: 'JoyAI-Code — 主力代码模型（推荐）', value: 'JoyAI-Code' },
-          { label: 'Claude-Opus-4.7', value: 'Claude-Opus-4.7' },
-          { label: 'GLM-5.1 — 智谱 GLM 5.1', value: 'GLM-5.1' },
-          { label: 'GLM-5 — 智谱 GLM 5', value: 'GLM-5' },
-          { label: 'GLM-4.7 — 智谱 GLM 4.7', value: 'GLM-4.7' },
-          { label: 'Kimi-K2.6 — Moonshot Kimi K2.6', value: 'Kimi-K2.6' },
-          { label: 'Kimi-K2.5 — Moonshot Kimi K2.5', value: 'Kimi-K2.5' },
-          { label: 'MiniMax-M2.7 — MiniMax M2.7', value: 'MiniMax-M2.7' },
-          { label: 'Doubao-Seed-2.0-pro — 豆包 Seed 2.0 Pro', value: 'Doubao-Seed-2.0-pro' },
-        ],
+
       },
       {
         key: 'default_max_tokens',
@@ -57,8 +47,17 @@ const FIELD_GROUPS = [
     ],
   },
   {
+    title: '图片输入',
+    fields: [
+      { key: 'auto_compress_images', label: '自动压缩图片', tooltip: '压缩内嵌 PNG/JPEG，默认关闭；远程图片链接保持原样', placeholder: 'false', type: 'switch' as const },
+      { key: 'image_max_dimension', label: '图片最长边（像素）', tooltip: '保持比例缩小，范围 256–4096，默认 1600', placeholder: '1600', type: 'number' as const },
+      { key: 'image_jpeg_quality', label: 'JPEG 质量', tooltip: '范围 1–100，默认 80；透明图片保留 PNG', placeholder: '80', type: 'number' as const },
+    ],
+  },
+  {
     title: '连接优化',
     fields: [
+      { key: 'reasoning_tool_fallback', label: '工具与思考强度兼容重试', tooltip: '默认关闭。仅在上游明确拒绝 reasoning_effort 与工具组合时，保留工具并移除思考强度重试一次；可能使用上游默认思考强度', placeholder: 'false', type: 'switch' as const },
       {
         key: 'max_retries',
         label: '最大重试次数',
@@ -112,6 +111,7 @@ const FIELD_GROUPS = [
 
 const SettingsPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
+  const [modelOptions, setModelOptions] = useState<{label: string; value: string}[]>([]);
   const [saving, setSaving] = useState(false);
   const [changePwLoading, setChangePwLoading] = useState(false);
   const [form] = Form.useForm();
@@ -120,6 +120,7 @@ const SettingsPage: React.FC = () => {
   const fetchSettings = async () => {
     setLoading(true);
     try {
+      api.listModels().then(models => setModelOptions(models.map(m => ({label: m.name || m.id, value: m.id})))).catch(e => message.warning(`模型刷新失败：${e.message}`));
       const data = await api.getSettings();
       // 后端设置统一存为字符串。switch 字段需转回布尔再回填表单，
       // 否则存着的 "false"（字符串）会被当成 truthy 而显示成「开」，
@@ -132,7 +133,7 @@ const SettingsPage: React.FC = () => {
       }
       const normalized: Record<string, unknown> = { ...data };
       for (const key of switchKeys) {
-        normalized[key] = data[key] !== 'false';
+        normalized[key] = key === 'enable_request_logging' ? data[key] !== 'false' : data[key] === 'true';
       }
       form.setFieldsValue(normalized);
     } catch (e: unknown) {
@@ -224,7 +225,9 @@ const SettingsPage: React.FC = () => {
       case 'select':
         return (
           <Form.Item key={field.key} name={field.key} label={label}>
-            <Select placeholder={field.placeholder} options={field.options} allowClear disabled={field.readOnly} />
+            {field.key === 'default_model'
+              ? <AutoComplete placeholder="选择或输入模型 ID" options={modelOptions} allowClear />
+              : <Select placeholder={field.placeholder} options={field.options} allowClear disabled={field.readOnly} />}
           </Form.Item>
         );
       case 'switch':

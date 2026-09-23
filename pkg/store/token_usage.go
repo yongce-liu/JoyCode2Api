@@ -6,6 +6,24 @@ import (
 )
 
 type ctxKey struct{}
+type requestErrorKey struct{}
+type RequestError struct {
+	Status  int
+	Message string
+}
+
+func SetRequestError(r *http.Request, status int, message string) {
+	if e, ok := r.Context().Value(requestErrorKey{}).(*RequestError); ok {
+		e.Status = status
+		e.Message = message
+	}
+}
+func GetRequestError(r *http.Request) RequestError {
+	if e, ok := r.Context().Value(requestErrorKey{}).(*RequestError); ok {
+		return *e
+	}
+	return RequestError{}
+}
 
 type modelCtxKey struct{}
 
@@ -15,7 +33,8 @@ type accountModelCtxKey struct{}
 // Returns a pointer that handlers can update with SetTokenUsage.
 func InitTokenUsage(r *http.Request) *http.Request {
 	usage := &[2]int{0, 0}
-	return r.WithContext(context.WithValue(r.Context(), ctxKey{}, usage))
+	ctx := context.WithValue(r.Context(), requestErrorKey{}, &RequestError{})
+	return r.WithContext(context.WithValue(ctx, ctxKey{}, usage))
 }
 
 // SetTokenUsage updates the token usage for the request.

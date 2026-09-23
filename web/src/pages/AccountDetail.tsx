@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Alert, Card, Row, Col, Statistic, Typography, Skeleton, Tag, Select, Button,
+  AutoComplete, Alert, Card, Row, Col, Statistic, Typography, Skeleton, Tag, Button,
   message, Space, Table, Badge, Segmented, Popconfirm, Tooltip, Divider,
 } from 'antd';
 import {
@@ -20,18 +20,9 @@ import type { Account, AccountStats, ModelInfo, RequestLog } from '../api';
 import SvgClaudeCode from '../components/ClaudeCodeIcon';
 import SvgCodex from '../components/CodexIcon';
 import CommandTooltip from '../components/CommandTooltip';
+import CustomTokenButton from '../components/CustomTokenButton';
 
-const BUILTIN_MODELS = [
-  { label: 'JoyAI-Code（推荐）', value: 'JoyAI-Code' },
-  { label: 'Claude-Opus-4.7', value: 'Claude-Opus-4.7' },
-  { label: 'GLM-5.1', value: 'GLM-5.1' },
-  { label: 'GLM-5', value: 'GLM-5' },
-  { label: 'GLM-4.7', value: 'GLM-4.7' },
-  { label: 'Kimi-K2.6', value: 'Kimi-K2.6' },
-  { label: 'Kimi-K2.5', value: 'Kimi-K2.5' },
-  { label: 'MiniMax-M2.7', value: 'MiniMax-M2.7' },
-  { label: 'Doubao-Seed-2.0-pro', value: 'Doubao-Seed-2.0-pro' },
-];
+
 
 const isClaudeModel = (model?: string) => model === 'Claude-Opus-4.7';
 
@@ -130,6 +121,7 @@ const AccountDetail: React.FC = () => {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [modelLoading, setModelLoading] = useState(false);
+  const [modelDraft, setModelDraft] = useState('');
   const [savingModel, setSavingModel] = useState(false);
   const [logFilter, setLogFilter] = useState<string>('all');
   const [activeSessions, setActiveSessions] = useState(0);
@@ -146,6 +138,7 @@ const AccountDetail: React.FC = () => {
       ]);
       const acc = accounts.find((a) => a.user_id === decodedKey);
       setAccount(acc || null);
+      setModelDraft(acc?.default_model || '');
       setStats(statsData);
       setLogs(logsData.logs || []);
     } catch (e: unknown) {
@@ -161,7 +154,7 @@ const AccountDetail: React.FC = () => {
       const data = await api.listAccountModels(decodedKey);
       setModels(data);
     } catch {
-      // fallback to builtin
+      message.warning('模型刷新失败，可以手动输入模型 ID');
     } finally {
       setModelLoading(false);
     }
@@ -210,12 +203,7 @@ const AccountDetail: React.FC = () => {
   }
   if (!account) return <div style={{ textAlign: 'center', padding: 100 }}>账号不存在</div>;
 
-  const allModelOptions = [
-    ...BUILTIN_MODELS,
-    ...models
-      .filter((m) => !BUILTIN_MODELS.some((b) => b.value === m.id))
-      .map((m) => ({ label: m.name || m.id, value: m.id })),
-  ];
+  const allModelOptions = models.map(m => ({label: m.name || m.id, value: m.id}));
 
   const filteredLogs = logFilter === 'all'
     ? logs
@@ -332,6 +320,7 @@ const AccountDetail: React.FC = () => {
             <Typography.Text code copyable style={{ fontSize: 11 }}>
               {account.api_token}
             </Typography.Text>
+            <CustomTokenButton userId={account.user_id} onSaved={fetchData} />
           </div>
           <div style={{ marginTop: 6 }}>
             {activeSessions > 0 ? (
@@ -348,20 +337,20 @@ const AccountDetail: React.FC = () => {
           </div>
         </div>
         <Space wrap>
-          <Tooltip title="此模型的用途仅限生成下方的快速启动命令。实际请求中的模型由客户端指定（如 ANTHROPIC_MODEL 环境变量），始终优先于本设置。模型列表来自 JoyCode API 支持的模型 + 服务器动态获取的扩展模型。">
+          <Tooltip title="此模型的用途仅限生成下方的快速启动命令。实际请求中的模型由客户端指定（如 ANTHROPIC_MODEL 环境变量），始终优先于本设置。模型列表实时来自 JoyCode API，也可手动输入未列出的模型 ID。">
             <QuestionCircleOutlined style={{ color: '#94A3B8', cursor: 'help' }} />
           </Tooltip>
-          <Select
+          <AutoComplete
             style={{ width: 220 }}
-            value={account.default_model || undefined}
-            placeholder="默认模型"
+            value={modelDraft}
+            placeholder={modelLoading ? "正在刷新模型…" : "选择或输入模型 ID"}
             options={allModelOptions}
             allowClear
-            loading={modelLoading}
-            onChange={handleModelChange}
+            onChange={setModelDraft}
             disabled={savingModel}
             size="small"
           />
+          <Button size="small" loading={savingModel} disabled={modelDraft === account.default_model} onClick={() => handleModelChange(modelDraft)}>保存模型</Button>
           {isClaudeModel(account.default_model) && (
             <Tooltip title="Claude 模型需要本机登录 JoyCode IDE">
               <InfoCircleOutlined style={{ color: '#F59E0B' }} />

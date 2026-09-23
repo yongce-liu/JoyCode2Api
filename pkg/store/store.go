@@ -810,9 +810,7 @@ func (s *Store) GetAccountByToken(token string) (*Account, error) {
 
 func (s *Store) RenewToken(userID string) (string, error) {
 	token := generateToken()
-	_, err := s.db.Exec("UPDATE accounts SET api_token = ?, updated_at = datetime('now', 'localtime') WHERE user_id = ?", token, userID)
-	if err != nil {
-		slog.Error("store: renew token failed", "user_id", userID, "error", err)
+	if err := s.UpdateAPIToken(userID, token); err != nil {
 		return "", err
 	}
 	return token, nil

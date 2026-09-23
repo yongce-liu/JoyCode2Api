@@ -444,3 +444,37 @@ web/                    前端源码（React 19 + Ant Design 6 + Vite 8）
 ## 许可证
 
 [Apache 2.0](./LICENSE)
+
+### 动态模型、图片压缩与 GPT 工具兼容
+
+- `GET /v1/models` 每次读取当前账户的上游模型列表；后台设置和账户详情刷新时也重新读取，使用 `modelId` / `chatApiModel`，不再用展示名代替调用 ID。后台允许手动输入未列出的模型 ID。
+- OpenAI 请求中明确指定的模型原样发送；仅省略模型时使用账户默认模型、系统默认模型、内置默认模型。不在列表中的模型由上游校验，错误日志保留请求模型。Anthropic 接口保留小写 `claude-*` 的既有默认模型映射，其余明确 ID 原样发送。
+- 上游 HTTP 200 内的 JSON/SSE 错误也会记录为失败；`6002`（模型不存在）转换为 404。流式响应开始后无法更改线上 HTTP 状态，错误通过 SSE 返回，后台按实际错误状态统计。
+- 设置页新增 `auto_compress_images`（默认关闭）、`image_max_dimension`（默认 1600，256–4096）、`image_jpeg_quality`（默认 80，1–100）。支持 OpenAI/Anthropic 内嵌 PNG/JPEG 及 Anthropic 工具结果内的图片；保持比例、不放大，透明图片保留 PNG，仅采用更小的编码结果。远程 URL、动画/不支持的格式、超出解码上限的图片保持原样。
+- `reasoning_effort`、`max_completion_tokens`、`parallel_tool_calls`、`stream_options`、`response_format` 均会转发，工具定义和工具结果保持原样。
+
+### 自定义 API Token
+
+账户列表的「API Token」列和账户详情页提供「自定义 Token」入口，可以把账户的路由 Token 改成任意 1–256 位字母、数字及 `. _ ~ -` 的组合（不能使用保留值 `joycode` / `default`，也不能与其他账户的 Token 或用户 ID 重复）。服务端在单个事务中校验并更新，更新失败不会改动现有 Token；更新账户凭据（pt_key）不会覆盖自定义 Token。原有「随机重置」功能仍然保留。
+
+2026-09-22 使用本机账户实测：`gpt-5.6-sol` 普通对话、单独 `high`、单独工具调用成功；同时提供工具和 `reasoning_effort: "high"` 时，上游明确要求使用 Responses API 或 `none`。`tools + none` 流式调用成功。测试过的 JoyCode Responses 直连入口返回“请升级版本”，候选网关接口返回不存在，因此本项目不宣称已经支持保留推理强度的 Responses 转发。
+
+cc-switch 应使用 `/v1/chat/completions`（不是 `/v1/chat/competitions`）。该模型需要工具调用时，可以将思考强度设为 `none`；也可在设置页启用 `reasoning_tool_fallback`（默认关闭）：仅遇到明确的工具/思考强度冲突时，保留工具并删除 `reasoning_effort` 重试一次。支持普通及流式请求，不对配额、认证、网络等错误执行这种降级。此选项使用上游默认思考行为，**不能保证原先请求的 high/xhigh/max 强度**。
+
+OpenAI 官方的 [Chat Completions 参数文档](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) 与 [GPT-5.6 Sol 模型文档](https://developers.openai.com/api/docs/models/gpt-5.6-sol) 可用于核对参数；JoyCode 的路由、配额和模型可用性仍以其实际响应为准。
+
+Docker 构建现在包含前端构建，设置页改动会一并打包：
+
+```bash
+docker build -t joycode-proxy:fixed .
+```
+
+如 Docker Hub 在当前网络下无法连接，可以替换基础镜像和 Alpine 包源：
+
+```bash
+docker build \
+  --build-arg NODE_IMAGE=docker.m.daocloud.io/library/node:22-alpine \
+  --build-arg RUNTIME_IMAGE=docker.m.daocloud.io/library/alpine:3.19 \
+  --build-arg ALPINE_MIRROR=https://mirrors.aliyun.com/alpine \
+  -t joycode-proxy:fixed .
+```
