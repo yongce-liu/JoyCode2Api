@@ -50,10 +50,13 @@ type colorEndpoint struct {
 
 var colorEndpoints = map[string]colorEndpoint{
 	"/api/saas/openai/v1/chat/completions": {"chat_completions", "/api/saas/openai/v2/chat/completions"},
-	"/api/saas/models/v1/modelList":        {"joycode_modelList", "/api/saas/models/v2/modelList"},
-	"/api/saas/openai/v1/web-search":       {"web_search", "/api/saas/openai/v2/web-search"},
-	"/api/saas/user/v1/userInfo":           {"joycode_userInfo", "/api/saas/user/v2/userInfo"},
-	"/api/saas/anthropic/v1/messages":      {"anthropic_completions", "/api/saas/anthropic/v1/messages"},
+	// Responses API：官方 client（joycoder-editor 3.0.10）只有 v1 rawUrl，
+	// gateway 模式按 functionId 路由，direct 模式也是 v1 路径。
+	"/api/saas/openai/v1/responses":   {"responses_completions", "/api/saas/openai/v1/responses"},
+	"/api/saas/models/v1/modelList":   {"joycode_modelList", "/api/saas/models/v2/modelList"},
+	"/api/saas/openai/v1/web-search":  {"web_search", "/api/saas/openai/v2/web-search"},
+	"/api/saas/user/v1/userInfo":      {"joycode_userInfo", "/api/saas/user/v2/userInfo"},
+	"/api/saas/anthropic/v1/messages": {"anthropic_completions", "/api/saas/anthropic/v1/messages"},
 }
 
 type Client struct {

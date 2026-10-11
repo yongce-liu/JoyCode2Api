@@ -34,6 +34,7 @@ func (s *Server) getClient(r *http.Request) *joycode.Client {
 // RegisterRoutes registers all OpenAI-compatible endpoints on the mux.
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/chat/completions", s.handleChat)
+	mux.HandleFunc("/v1/responses", s.handleResponses)
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/web-search", s.handleWebSearch)
 	mux.HandleFunc("/v1/rerank", s.handleRerank)
@@ -100,7 +101,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]interface{}{
 		"status": "ok", "service": "joycode-openai-proxy",
 		"endpoints": []string{
-			"/v1/chat/completions", "/v1/models",
+			"/v1/chat/completions", "/v1/responses", "/v1/models",
 			"/v1/web-search", "/v1/rerank",
 		},
 	})
